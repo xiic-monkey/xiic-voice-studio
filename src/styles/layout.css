@@ -1,0 +1,403 @@
+/* ============================================================
+   布局层：应用骨架、顶栏、工作区、底栏、设置页外壳
+   ============================================================ */
+
+.studio-shell {
+  background: var(--bg-app);
+  display: grid;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr) var(--playerbar-h);
+  height: 100vh;
+}
+
+/* ---- 顶栏 ---- */
+.topbar {
+  align-items: center;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  padding: 0 var(--sp-5);
+}
+
+.brand {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.brand > svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.brand strong {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+}
+
+.brand span {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+}
+
+.toolbar {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-1);
+  justify-content: center;
+}
+
+.toolbar button {
+  font-size: var(--fs-sm);
+  min-height: var(--control-h-md);
+}
+
+.job-strip {
+  align-items: center;
+  color: var(--text-secondary);
+  display: flex;
+  font-size: var(--fs-xs);
+  gap: var(--sp-2);
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.job-strip svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.job-strip > svg.idle {
+  color: var(--success-solid);
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- 工作区三栏 ---- */
+.workspace {
+  background: var(--bg-app);
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--inspector-w);
+  min-height: 0;
+}
+
+.sidebar,
+.inspector {
+  background: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4);
+}
+
+.sidebar {
+  border-right: 1px solid var(--border-subtle);
+}
+
+.inspector {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.sidebar-footer {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: auto;
+  padding-top: var(--sp-3);
+}
+
+.sidebar-footer button {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* ---- 脚本主区 ---- */
+.script-surface {
+  background: var(--bg-surface);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.surface-header {
+  align-items: center;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: space-between;
+  min-height: 72px;
+  padding: var(--sp-3) var(--sp-6);
+}
+
+.surface-header h1 {
+  margin: 0;
+}
+
+.surface-header span {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+
+.surface-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+}
+
+.surface-actions button {
+  font-size: var(--fs-xs);
+  min-height: var(--control-h);
+}
+
+/* 导出范围条 */
+.export-scope {
+  align-items: center;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  max-height: 104px;
+  min-height: 44px;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-6);
+}
+
+.export-scope-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.export-scope label {
+  align-items: center;
+  color: var(--text-primary);
+  display: inline-flex;
+  font-size: var(--fs-xs);
+  gap: var(--sp-1);
+  max-width: 220px;
+}
+
+.export-scope label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 章节原文预览 */
+.chapter-preview {
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  max-height: 180px;
+  min-height: 0;
+}
+
+.chapter-preview-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.chapter-preview-body {
+  font-size: var(--fs-xs);
+  line-height: var(--lh-relaxed);
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-4);
+  white-space: pre-wrap;
+}
+
+/* ---- 底部播放条 ---- */
+.player {
+  align-items: center;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  display: grid;
+  gap: var(--sp-6);
+  grid-template-columns: minmax(0, 1fr) 380px minmax(0, 0.8fr);
+  padding: var(--sp-3) var(--sp-5);
+}
+
+.player strong {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.player span {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+
+.notice {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 设置页外壳 ---- */
+.settings-shell {
+  background: var(--bg-surface);
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  height: 100vh;
+  min-width: 0;
+}
+
+.settings-sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sp-5) var(--sp-3);
+}
+
+.settings-brand {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2) var(--sp-5);
+}
+
+.settings-brand > svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.settings-brand strong {
+  display: block;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.settings-brand span {
+  color: var(--text-secondary);
+  display: block;
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+}
+
+.settings-back {
+  justify-content: flex-start;
+  margin-bottom: var(--sp-6);
+  width: 100%;
+}
+
+.settings-group-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  padding: 0 var(--sp-2) var(--sp-2);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.settings-nav button {
+  font-size: var(--fs-sm);
+  justify-content: flex-start;
+  min-height: var(--control-h-lg);
+  padding: 0 var(--sp-3);
+  width: 100%;
+}
+
+.settings-nav button.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.settings-main {
+  background: var(--bg-app);
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.settings-header {
+  align-items: center;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: space-between;
+  min-height: 80px;
+  padding: var(--sp-4) var(--sp-8);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.settings-header span {
+  color: var(--text-secondary);
+  display: block;
+  font-size: var(--fs-xs);
+  margin-bottom: var(--sp-1);
+}
+
+.settings-header h1 {
+  font-size: var(--fs-2xl);
+  margin: 0;
+}
+
+.settings-content {
+  max-width: 1120px;
+  padding: var(--sp-6) var(--sp-8) var(--sp-16);
+}
+
+/* ---- 紧凑断点：1080 ~ 1280 ---- */
+@media (max-width: 1280px) {
+  .workspace {
+    grid-template-columns: 248px minmax(0, 1fr) 280px;
+  }
+
+  .sidebar,
+  .inspector {
+    padding: var(--sp-3);
+  }
+
+  .surface-header {
+    padding: var(--sp-3) var(--sp-4);
+  }
+
+  .player {
+    gap: var(--sp-4);
+    grid-template-columns: minmax(0, 1fr) 320px minmax(0, 0.75fr);
+  }
+
+  .settings-shell {
+    grid-template-columns: 232px minmax(0, 1fr);
+  }
+
+  .settings-header,
+  .settings-content {
+    padding-left: var(--sp-6);
+    padding-right: var(--sp-6);
+  }
+}

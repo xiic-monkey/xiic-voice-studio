@@ -1,0 +1,312 @@
+/* ============================================================
+   基础层：reset、排版、控件、滚动条、工具类
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1080px;
+  min-height: 720px;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family:
+    Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif,
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  overflow: hidden;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body:has(.settings-shell) {
+  min-width: 0;
+}
+
+/* ---- 滚动条 ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-gutter: stable;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: var(--r-full);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---- 标题与文本 ---- */
+h1 {
+  color: var(--text-primary);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  margin: 0 0 var(--sp-1);
+}
+
+h2 {
+  color: var(--text-primary);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  margin: 0 0 var(--sp-1);
+}
+
+h3 {
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-tight);
+  margin: 0;
+}
+
+small {
+  color: var(--text-secondary);
+  display: block;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* ---- 按钮 ---- */
+button {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  gap: var(--sp-2);
+  justify-content: center;
+  min-height: var(--control-h-md);
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  transition:
+    background-color var(--duration) var(--ease),
+    border-color var(--duration) var(--ease),
+    color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--accent);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button:disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+button.primary-action {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--text-inverse);
+  font-weight: var(--fw-medium);
+}
+
+button.primary-action:hover:not(:disabled) {
+  background: var(--ink-hover);
+  border-color: var(--ink-hover);
+  color: var(--text-inverse);
+  box-shadow: var(--shadow-md);
+}
+
+/* 无边框按钮：工具栏、导航、行内操作 */
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+
+/* 纯图标按钮 */
+button.icon-button {
+  background: transparent;
+  border-color: transparent;
+  min-width: var(--control-h-md);
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+
+button.icon-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--accent);
+}
+
+button.icon-button.compact {
+  min-width: var(--control-h-sm);
+  min-height: var(--control-h-sm);
+}
+
+/* ---- 表单控件 ---- */
+input,
+select,
+textarea {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  min-height: var(--control-h);
+  padding: var(--sp-1) var(--sp-2);
+  width: 100%;
+  transition:
+    border-color var(--duration) var(--ease),
+    box-shadow var(--duration) var(--ease);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring-soft);
+  outline: none;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  background: var(--bg-disabled);
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+textarea {
+  line-height: var(--lh-normal);
+  resize: none; /* 表格内禁止拖拽，避免撑破行高 */
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+  height: 14px;
+  min-height: 14px;
+  padding: 0;
+  width: 14px;
+}
+
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+input.path-display {
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  cursor: default;
+  font-size: var(--fs-2xs);
+}
+
+/* ---- 布局工具类 ---- */
+.row,
+.inline {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.row {
+  min-width: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- 空状态 ---- */
+.empty {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  margin: var(--sp-2) 0;
+}
+
+.empty-state {
+  align-items: center;
+  color: var(--text-tertiary);
+  display: flex;
+  justify-content: center;
+  min-height: 240px;
+  padding: var(--sp-6);
+  text-align: center;
+}

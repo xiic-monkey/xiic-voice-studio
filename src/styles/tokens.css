@@ -1,0 +1,123 @@
+/* ============================================================
+   Xiic Voice Studio — Design Tokens
+   全项目唯一的尺寸 / 颜色 / 动效来源。
+   组件样式只允许引用本文件的变量，禁止出现裸值。
+   ============================================================ */
+
+:root {
+  /* ---- 间距：4px 栅格 ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* ---- 圆角：四级 ---- */
+  --r-xs: 4px; /* 徽章、标签 */
+  --r-sm: 6px; /* 输入框、按钮、卡片 */
+  --r-md: 10px; /* 面板、分组容器 */
+  --r-lg: 14px; /* 弹窗、大容器 */
+  --r-full: 999px; /* 胶囊、圆形 */
+
+  /* ---- 字阶：七级 ---- */
+  --fs-2xs: 11px; /* 辅助说明、时间戳 */
+  --fs-xs: 12px; /* 次要文本、表头 */
+  --fs-sm: 13px; /* 正文 */
+  --fs-md: 14px; /* 小标题、按钮 */
+  --fs-lg: 16px; /* 区块标题 */
+  --fs-xl: 20px; /* 页面标题 */
+  --fs-2xl: 24px; /* 设置页标题 */
+
+  /* ---- 字重：三级。禁止使用 600/700 以外的值，
+         中文 PingFang SC 会被取整，与 Inter 可变字重不一致 ---- */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+
+  /* ---- 行高 ---- */
+  --lh-tight: 1.25;
+  --lh-normal: 1.5;
+  --lh-relaxed: 1.65;
+
+  /* ---- 背景 ---- */
+  --bg-app: #f5f6f8;
+  --bg-surface: #ffffff;
+  --bg-sidebar: #f8f9fb;
+  --bg-subtle: #f7f8fa; /* 统一替代 #f8fafc / #fbfcfe / #fafbfc / #f2f4f7 */
+  --bg-hover: #f1f4f9;
+  --bg-selected: #f3f8ff;
+  --bg-disabled: #eef1f5;
+
+  /* ---- 文本 ---- */
+  --text-primary: #20242d;
+  --text-secondary: #737b89;
+  --text-tertiary: #9aa3af;
+  --text-inverse: #ffffff;
+
+  /* ---- 边框 ---- */
+  --border-subtle: #e8ebf0;
+  --border-default: #dfe4eb;
+  --border-strong: #cfd9e8;
+
+  /* ---- 主色 ---- */
+  --accent: #276ef1;
+  --accent-hover: #1c5fd8;
+  --accent-soft: #edf4ff;
+  --accent-border: #dbe8ff;
+  --accent-text: #276ef1;
+
+  /* ---- 墨色：主要按钮 ---- */
+  --ink: #1a1f2b;
+  --ink-hover: #2a3140;
+
+  /* ---- 语义色：成功 ---- */
+  --success-bg: #eef9f2;
+  --success-border: #cbeed8;
+  --success-text: #257044;
+  --success-solid: #35a766;
+
+  /* ---- 语义色：警告 ---- */
+  --warn-bg: #fff8e8;
+  --warn-border: #f2dda8;
+  --warn-text: #7b5a12;
+  --warn-solid: #d09b27;
+
+  /* ---- 语义色：危险 ---- */
+  --danger-bg: #fcebeb;
+  --danger-border: #f7c1c1;
+  --danger-text: #a32d2d;
+  --danger-solid: #d95c5c;
+
+  /* ---- 阴影 ---- */
+  --shadow-xs: 0 1px 2px rgba(24, 32, 52, 0.035);
+  --shadow-sm: 0 2px 8px rgba(24, 32, 52, 0.035);
+  --shadow-md: 0 10px 24px rgba(17, 22, 42, 0.14);
+  --shadow-lg: 0 24px 70px rgba(23, 25, 35, 0.2);
+
+  /* ---- 动效 ---- */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration: 160ms;
+
+  /* ---- 控件高度 ---- */
+  --control-h-sm: 28px;
+  --control-h: 32px;
+  --control-h-md: 36px;
+  --control-h-lg: 40px;
+
+  /* ---- 焦点环 ---- */
+  --focus-ring: 0 0 0 3px rgba(39, 110, 241, 0.28);
+  --focus-ring-soft: 0 0 0 3px rgba(39, 110, 241, 0.12);
+
+  /* ---- 布局尺度 ---- */
+  --topbar-h: 60px;
+  --playerbar-h: 76px;
+  --sidebar-w: 280px;
+  --inspector-w: 312px;
+  --row-min-h: 56px;
+}
