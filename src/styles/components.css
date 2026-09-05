@@ -51,16 +51,47 @@
 }
 
 .chapter-list {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
 }
 
-.chapter-item {
-  align-items: stretch;
+.chapter-search {
+  align-items: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
   border-radius: var(--r-sm);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 48px;
+  color: var(--text-tertiary);
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--sp-2);
+}
+
+.chapter-search input {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  flex: 1 1 auto;
+  font-size: var(--fs-xs);
+  min-height: var(--control-h-sm);
+  padding: 0;
+}
+
+.chapter-search input:focus {
+  box-shadow: none;
+}
+
+/* 单行紧凑行：标题省略，状态在右侧；悬停时状态让位给操作按钮 */
+.chapter-item {
+  align-items: center;
+  border-radius: var(--r-sm);
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  height: 36px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
   transition: background-color var(--duration-fast) var(--ease);
 }
 
@@ -75,17 +106,16 @@
 }
 
 .chapter-select {
-  align-items: flex-start;
   background: transparent;
   border: 0;
-  border-radius: var(--r-sm);
-  flex-direction: column;
-  gap: 2px;
-  justify-content: center;
-  min-height: 48px;
-  padding: var(--sp-2) var(--sp-3);
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
   text-align: left;
-  width: 100%;
+  white-space: nowrap;
 }
 
 .chapter-select:hover:not(:disabled) {
@@ -96,22 +126,31 @@
 .chapter-select strong {
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chapter-item.selected .chapter-select strong {
   color: var(--accent);
 }
 
-.chapter-select small {
+.chapter-meta {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
   font-size: var(--fs-2xs);
 }
 
+.chapter-item:hover .chapter-meta {
+  display: none;
+}
+
 .chapter-item-actions {
-  align-items: center;
+  display: none;
+  gap: 0;
+}
+
+.chapter-item:hover .chapter-item-actions {
   display: flex;
-  gap: var(--sp-1);
-  justify-content: flex-end;
-  padding-right: var(--sp-2);
 }
 
 /* ---------- 分段表 ---------- */
@@ -124,7 +163,8 @@
 
 /*
   两行式布局：上排放窄控件，下排文本占满整宽。
-  最低宽度需求 516px，1080 窗口下中间列有 552px，不再横向溢出。
+  最低宽度需求 548px（操作列容纳 播放/上传/重生成/删除 四个按钮），
+  1080 窗口下中间列有约 520px，不再横向溢出。
 */
 .segment-row {
   border-bottom: 1px solid var(--border-subtle);
@@ -135,7 +175,7 @@
     "text  text text   text   text";
   grid-template-columns:
     40px minmax(88px, 0.9fr) minmax(96px, 1fr)
-    minmax(104px, auto) 108px;
+    minmax(104px, auto) 140px;
   padding: var(--sp-3) var(--sp-4);
   transition: background-color var(--duration-fast) var(--ease);
 }
@@ -218,6 +258,14 @@
   justify-content: flex-end;
 }
 
+/* 行内操作用小方按钮：四枚（播放/上传/重生成/删除）总量控制在操作列 140px 内，
+   否则 justify-content: flex-end 会让溢出部分左移压住状态徽章 */
+.segment-actions button {
+  min-height: var(--control-h-sm);
+  min-width: var(--control-h-sm);
+  padding: 0;
+}
+
 /* ---------- 状态徽章 ---------- */
 .status-group {
   align-items: center;
@@ -266,6 +314,86 @@
   background: var(--accent-soft);
   border-color: var(--accent-border);
   color: var(--accent-text);
+}
+
+/* ---------- 任务队列分组 ---------- */
+.job-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.job-section-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.02em;
+}
+
+.job-section-label-alert {
+  color: var(--warn-text);
+}
+
+.job-progress {
+  background: var(--border-subtle);
+  border-radius: var(--r-full);
+  height: 4px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.job-progress span {
+  background: var(--accent);
+  border-radius: var(--r-full);
+  display: block;
+  height: 100%;
+  transition: width var(--duration) var(--ease);
+}
+
+.job-card-alert {
+  border-color: var(--warn-border);
+}
+
+.job-history-row {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.job-history-row .job-history-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.job-clear-button {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+
+.job-card-done {
+  opacity: 0.72;
+}
+
+.job-history-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  display: flex;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-medium);
+  gap: var(--sp-1);
+  justify-content: flex-start;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--sp-1);
+  width: 100%;
+}
+
+.job-history-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* ---------- 角色卡片 ---------- */
@@ -1216,11 +1344,18 @@ input.audio-slider:disabled {
   background: var(--warn-solid);
 }
 
+/* 与输入框并排的控件：拉伸到与输入框同高，消除 36px 按钮配 40px 输入的错位 */
 .settings-voice-row {
-  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
+}
+
+.settings-voice-row > input,
+.settings-voice-row > select,
+.settings-voice-row > button {
+  align-self: stretch;
+  min-height: var(--control-h);
 }
 
 .settings-voice-row > input {
@@ -1248,7 +1383,7 @@ input.audio-slider:disabled {
 }
 
 .path-display-row {
-  align-items: center;
+  align-items: stretch;
   display: flex;
   gap: var(--sp-2);
   min-width: 0;
@@ -1262,6 +1397,7 @@ input.audio-slider:disabled {
 
 .path-display-row > button {
   flex: 0 0 auto;
+  min-height: 0;
 }
 
 .export-note {

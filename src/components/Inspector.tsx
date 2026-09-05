@@ -1,4 +1,5 @@
-import { CheckCircle2, Library, Mic2, Pencil, RefreshCw, Save, Sparkles, UserRound, X } from "lucide-react";
+import { useState } from "react";
+import { CheckCircle2, ChevronDown, ChevronRight, Library, Mic2, Pencil, RefreshCw, Save, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import type { StudioSnapshot, VoiceProfile } from "../types";
 import { ageStages, ageStageLabels, reviewIssueLabels, text } from "../constants";
 import { displayJobType, displayStatus } from "../utils";
@@ -244,10 +245,43 @@ type JobPanelProps = {
   productionReport: ProductionReportLite | null;
   onCancelJob: (jobId: string) => void;
   onRetryJob: (jobId: string) => void;
+  onDeleteJob: (jobId: string) => void;
+  onClearFinishedJobs: () => void;
 };
 
-export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob }: JobPanelProps) {
-  const jobs = (snapshot?.jobs ?? []).slice(0, 6);
+type Job = NonNullable<StudioSnapshot["jobs"]>[number];
+
+/**
+ * 按"队列"语义分组：进行中在最上、需要处理的失败任务居中、
+ * 已完成的默认折叠成一行摘要。后端按创建时间倒序返回。
+ */
+function groupJobs(jobs: Job[]) {
+  const active = jobs.filter((job) => job.status === "running" || job.status === "pending");
+  const attention = jobs.filter((job) => job.status === "failed" || job.status === "canceled");
+  const done = jobs.filter(
+    (job) => job.status !== "running" && job.status !== "pending" && job.status !== "failed" && job.status !== "canceled",
+  );
+  return { active, attention, done };
+}
+
+/** 后端目前只支持重试语音生成任务 */
+function canRetryJob(job: Job) {
+  return job.jobType === "tts_batch";
+}
+
+export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob, onDeleteJob, onClearFinishedJobs }: JobPanelProps) {
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const { active, attention, done } = groupJobs(snapshot?.jobs ?? []);
+
+  function handleDelete(job: Job) {
+    if (window.confirm(`删除这条“${displayJobType(job.jobType)}”任务记录？`)) onDeleteJob(job.id);
+  }
+
+  function handleClearFinished() {
+    const total = attention.length + done.length;
+    if (window.confirm(`清空全部 ${total} 条已结束的任务记录？`)) onClearFinishedJobs();
+  }
+
   return (
     <Panel title={text.queue} className="jobs-panel">
       {productionReport && (
@@ -258,27 +292,85 @@ export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob }
           </small>
         </div>
       )}
-      {jobs.map((job) => (
-        <div className="job-card" key={job.id}>
-          <div className="job-card-main">
-            <span>{displayJobType(job.jobType)}</span>
-            <small>{displayStatus(job.status)} · {Math.round(job.progress * 100)}%{job.error ? " · " + job.error : ""}</small>
-          </div>
-          <div className="job-actions">
-            {(job.status === "running" || job.status === "pending") && (
-              <button title={text.cancelJob} onClick={() => onCancelJob(job.id)}>
-                <X size={14} />
-              </button>
-            )}
-            {(job.status === "failed" || job.status === "canceled") && (
-              <button title={text.retryJob} onClick={() => onRetryJob(job.id)}>
-                <RefreshCw size={14} />
-              </button>
-            )}
-          </div>
+
+      {active.length > 0 && (
+        <div className="job-section">
+          <span className="job-section-label">进行中 · {active.length}</span>
+          {active.map((job) => (
+            <div className="job-card" key={job.id}>
+              <div className="job-card-main">
+                <strong>{displayJobType(job.jobType)}</strong>
+                <div className="job-progress">
+                  <span style={{ width: `${Math.round(job.progress * 100)}%` }} />
+                </div>
+                <small>{displayStatus(job.status)} · {Math.round(job.progress * 100)}%</small>
+              </div>
+              <div className="job-actions">
+                <button title={text.cancelJob} onClick={() => onCancelJob(job.id)}>
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
-      {!jobs.length && !productionReport && <EmptyState>暂无任务</EmptyState>}
+      )}
+
+      {attention.length > 0 && (
+        <div className="job-section">
+          <span className="job-section-label job-section-label-alert">需要处理 · {attention.length}</span>
+          {attention.map((job) => (
+            <div className="job-card job-card-alert" key={job.id}>
+              <div className="job-card-main">
+                <strong>{displayJobType(job.jobType)}</strong>
+                <small>{displayStatus(job.status)}{job.error ? " · " + job.error : ""}</small>
+                {!canRetryJob(job) && <small>请在工作台重新执行该操作</small>}
+              </div>
+              <div className="job-actions">
+                {canRetryJob(job) && (
+                  <button title={text.retryJob} onClick={() => onRetryJob(job.id)}>
+                    <RefreshCw size={14} />
+                  </button>
+                )}
+                <button title="删除记录" onClick={() => handleDelete(job)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {done.length > 0 && (
+        <div className="job-section">
+          <div className="job-history-row">
+            <button className="job-history-toggle" onClick={() => setHistoryOpen((open) => !open)}>
+              {historyOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              已完成 · {done.length} 个任务
+            </button>
+            <button className="icon-button compact job-clear-button" title="清空已结束任务记录" onClick={handleClearFinished}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+          {historyOpen &&
+            done.map((job) => (
+              <div className="job-card job-card-done" key={job.id}>
+                <div className="job-card-main">
+                  <strong>{displayJobType(job.jobType)}</strong>
+                  <small>{displayStatus(job.status)} · {Math.round(job.progress * 100)}%</small>
+                </div>
+                <div className="job-actions">
+                  <button title="删除记录" onClick={() => handleDelete(job)}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {!active.length && !attention.length && !done.length && !productionReport && (
+        <EmptyState>暂无任务</EmptyState>
+      )}
     </Panel>
   );
 }

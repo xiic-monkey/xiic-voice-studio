@@ -31,7 +31,9 @@ export function TopBar({
         <AudioLines size={22} />
         <div>
           <strong>Xiic Voice Studio</strong>
-          <span>{snapshot?.project.rootPath ?? text.noProject}</span>
+          <span title={snapshot?.project.rootPath} className="brand-path">
+            {snapshot ? `${snapshot.project.manifest.title} · ${snapshot.project.rootPath}` : text.noProject}
+          </span>
         </div>
       </div>
       <div className="toolbar">

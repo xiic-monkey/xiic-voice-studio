@@ -15,6 +15,16 @@ const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const LLM_MAX_ATTEMPTS: usize = 3;
 
+/// 这些 speaker 泛称不建角色：旁白由声音配置承担，其余无法稳定对应单一音色。
+/// 有身份的群杂（族人1、中年男人等）是合法角色，各自独立建档、可分配不同音色。
+const GENERIC_SPEAKERS: [&str; 12] = [
+    "旁白", "台词", "未知", "众人", "群众", "路人", "路人甲", "路人乙", "声音", "男声", "女声", "人群",
+];
+
+fn is_generic_speaker(value: &str) -> bool {
+    GENERIC_SPEAKERS.contains(&value.trim())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmSettings {
@@ -97,8 +107,28 @@ pub async fn call_openai_compatible(raw_text: &str, settings: LlmSettings) -> St
     let body = json!({
         "model": model,
         "messages": [
-            {"role": "system", "content": "你是中文有声书制作标注助手。只返回 JSON，不要 Markdown 或解释。JSON 必须符合：{\"segments\":[{\"text\":\"原文分段\",\"segmentType\":\"narration|dialogue|inner_monologue|sound_cue|transition|timing_anchor|unknown\",\"speaker\":null,\"emotion\":null,\"soundCue\":null,\"anchor\":null}],\"characters\":[{\"name\":\"角色名\",\"aliases\":[]}]}. 不要改写 segments.text。"},
-            {"role": "user", "content": format!("请按原文顺序标注下面的中文脚本，并尽量让每个 segments.text 与原文中的一行或一句完全一致：\n{}", raw_text)}
+            {"role": "system", "content": r#"你是中文有声书制作标注助手。任务：把中文小说原文拆成分段，标注每段的类型、说话人，并提取出场角色。只返回 JSON，不要 Markdown 代码块，不要任何解释。
+
+JSON 格式：
+{"segments":[{"text":"原文分段","segmentType":"narration|dialogue|inner_monologue|sound_cue|transition|timing_anchor|unknown","speaker":null,"emotion":null,"soundCue":null,"anchor":null}],"characters":[{"name":"角色名","aliases":[]}]}
+
+分段规则：
+1. segments.text 必须逐字复制原文，禁止改写、总结、合并或拆分。按原文顺序，一段对话或一句叙述为一个分段。
+2. segmentType 判定：
+   - narration：叙述、描写、旁白
+   - dialogue：角色说出口的台词（引号内内容或对话行）
+   - inner_monologue：人物内心活动、心理描写（没有说出口）
+   - sound_cue：音效、环境声提示
+   - transition：场景切换、时间过渡
+   - timing_anchor：时间点标记
+3. speaker 规则（最重要）：
+   - dialogue 的 speaker 填说话角色的名字，优先用全名（如"萧炎"）；名字尚未揭示时用稳定的描述性称呼（如"灰袍老者"），后文揭示后沿用正式名字
+   - inner_monologue 的 speaker 填心理活动所属的角色
+   - narration、sound_cue、transition、timing_anchor 的 speaker 必须是 null，旁白不是角色
+   - speaker 只能填具体人物，禁止填"旁白""台词""众人""群众""路人""声音""男声""女声"这类泛称；无法确定说话人时填 null
+   - 有身份但无姓名的配角是合法的 speaker：族人1、族人2、中年男人、店小二等。同身份的不同个体（族人1、族人2）是不同的人，编号必须原样保留、各自独立，禁止合并成同一个称呼
+4. characters：列出本章出场、有名字或有稳定称呼的故事角色，包括有身份无姓名的配角（族人1、族人2、中年男人等，每个编号单独一条，不要合并）。aliases 填同一角色的其他称呼（例如"药老"的别名是"药尘"）。不要收录旁白和纯泛称（众人、群众、人群、路人等）。"#},
+            {"role": "user", "content": format!("请标注以下章节原文：\n\n{raw_text}")}
         ]
     });
     let base_url = base_url.trim_end_matches('/');
@@ -352,11 +382,18 @@ pub fn apply_llm_marking(
         let Some(segment_type) = normalized_segment_type(&mark.segment_type) else {
             continue;
         };
+        // 旁白/音效/转场不归属角色，丢弃 LLM 可能误填的 speaker
+        let speaker = mark
+            .speaker
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|_| matches!(segment_type, "dialogue" | "inner_monologue"));
         conn.execute(
             "UPDATE segments SET segment_type = ?1, speaker = ?2, emotion = ?3, sound_cue = ?4, anchor = ?5, updated_at = ?6 WHERE id = ?7",
             params![
                 segment_type,
-                mark.speaker.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+                speaker,
                 mark.emotion,
                 mark.sound_cue,
                 mark.anchor,
@@ -369,25 +406,31 @@ pub fn apply_llm_marking(
     Ok(updated)
 }
 
-fn apply_character_aliases(
+pub fn apply_character_aliases(
     conn: &Connection,
     project_id: &str,
     characters: &[LlmCharacterMark],
 ) -> StudioResult<()> {
     for character in characters {
-        let Some(character_id) = conn
+        let name = character.name.trim();
+        if name.is_empty() || is_generic_speaker(name) {
+            continue;
+        }
+        let character_id = match conn
             .query_row(
                 "SELECT id FROM characters WHERE project_id = ?1 AND canonical_name = ?2",
-                params![project_id, character.name.trim()],
+                params![project_id, name],
                 |row| row.get::<_, String>(0),
             )
             .ok()
-        else {
-            continue;
+        {
+            Some(id) => id,
+            // LLM 提取到的角色若没在任何分段 speaker 里出现过，也补建档案
+            None => insert_character(conn, project_id, name)?,
         };
         for alias in &character.aliases {
             let alias = alias.trim();
-            if alias.is_empty() || alias == character.name.trim() {
+            if alias.is_empty() || alias == name {
                 continue;
             }
             conn.execute(
@@ -421,10 +464,26 @@ fn normalized_segment_type(value: &str) -> Option<&'static str> {
     }
 }
 
-pub fn extract_characters(conn: &Connection, project_id: &str) -> StudioResult<()> {
+fn pick_character_color(seed: &str) -> &'static str {
     let colors = [
         "#2f80ed", "#27ae60", "#b55400", "#9b51e0", "#c0392b", "#118c8c",
     ];
+    let hash = seed.bytes().map(u32::from).sum::<u32>();
+    &colors[(hash % colors.len() as u32) as usize]
+}
+
+fn insert_character(conn: &Connection, project_id: &str, name: &str) -> StudioResult<String> {
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO characters (id, project_id, canonical_name, gender, age_timeline, notes, default_color)
+         VALUES (?1, ?2, ?3, NULL, 'adult', NULL, ?4)",
+        params![id, project_id, name, pick_character_color(name)],
+    )?;
+    Ok(id)
+}
+
+/// 从分段 speaker 里提取角色。泛称（旁白、众人等）不建角色，保持分段无归属。
+pub fn extract_characters(conn: &Connection, project_id: &str) -> StudioResult<()> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT speaker FROM segments
          WHERE speaker IS NOT NULL AND speaker != '' AND character_id IS NULL ORDER BY speaker",
@@ -433,24 +492,19 @@ pub fn extract_characters(conn: &Connection, project_id: &str) -> StudioResult<(
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for speaker in speakers {
-        let existing: Option<String> = conn
+        if is_generic_speaker(&speaker) {
+            continue;
+        }
+        let character_id = match conn
             .query_row(
                 "SELECT id FROM characters WHERE project_id = ?1 AND canonical_name = ?2",
                 params![project_id, speaker],
                 |row| row.get(0),
             )
-            .ok();
-        let character_id = if let Some(id) = existing {
-            id
-        } else {
-            let id = Uuid::new_v4().to_string();
-            let color = colors[(speaker.len() + id.len()) % colors.len()];
-            conn.execute(
-                "INSERT INTO characters (id, project_id, canonical_name, gender, age_timeline, notes, default_color)
-                 VALUES (?1, ?2, ?3, NULL, 'adult', NULL, ?4)",
-                params![id, project_id, speaker, color],
-            )?;
-            id
+            .ok()
+        {
+            Some(id) => id,
+            None => insert_character(conn, project_id, &speaker)?,
         };
         conn.execute(
             "UPDATE segments SET character_id = ?1 WHERE speaker = ?2 AND character_id IS NULL",

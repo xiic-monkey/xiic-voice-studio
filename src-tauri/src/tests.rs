@@ -1436,4 +1436,83 @@ mod tests {
         )
         .unwrap();
     }
+
+    #[test]
+    fn marking_ignores_generic_speakers_and_narration_speaker() {
+        let root = std::env::temp_dir().join(format!("xiic-test-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "泛称过滤测试", None).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(
+            &source_path,
+            "旁白描述场景。\n“你好。”\n“让开。”\n“我是萧炎。”",
+        )
+        .unwrap();
+        let source = importer::read_source(&source_path).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let chapter_id = importer::import_source(&conn, &summary.manifest.id, &source)
+            .unwrap()
+            .remove(0);
+        importer::seed_segments_from_chapter(&conn, &chapter_id, false).unwrap();
+
+        let payload = serde_json::json!({
+            "choices": [{"message": {"content": serde_json::json!({
+                "segments": [
+                    {"text": "旁白描述场景。", "segmentType": "narration", "speaker": "旁白"},
+                    {"text": "“你好。”", "segmentType": "dialogue", "speaker": "路人甲"},
+                    {"text": "“让开。”", "segmentType": "dialogue", "speaker": "众人"},
+                    {"text": "“我是萧炎。”", "segmentType": "dialogue", "speaker": "萧炎"}
+                ],
+                "characters": [{"name": "旁白", "aliases": []}, {"name": "萧炎", "aliases": ["炎哥"]}]
+            }).to_string()}}]
+        })
+        .to_string();
+        let marking = ai::parse_marking_payload(&payload).unwrap();
+        ai::apply_llm_marking(&conn, &chapter_id, &marking).unwrap();
+        ai::extract_characters(&conn, &summary.manifest.id).unwrap();
+        ai::apply_character_aliases(&conn, &summary.manifest.id, &marking.characters).unwrap();
+
+        // 只建了真实角色；旁白和泛称（路人甲、众人）都不建角色
+        let mut names: Vec<String> = conn
+            .prepare("SELECT canonical_name FROM characters ORDER BY canonical_name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        names.sort();
+        assert_eq!(names, vec!["萧炎".to_string()]);
+
+        // narration 段的 speaker 被清空
+        let narration_speaker: Option<String> = conn
+            .query_row(
+                "SELECT speaker FROM segments WHERE text = '旁白描述场景。'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(narration_speaker, None);
+
+        // 泛称 speaker 保留原文标注，但不归属任何角色
+        let unassigned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM segments WHERE speaker IN ('路人甲', '众人') AND character_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unassigned, 2);
+
+        // 萧炎的分段已归属角色
+        let assigned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM segments s JOIN characters c ON s.character_id = c.id
+                 WHERE c.canonical_name = '萧炎'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(assigned, 1);
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -27,6 +27,10 @@
   min-width: 0;
 }
 
+.brand > div {
+  min-width: 0;
+}
+
 .brand > svg {
   color: var(--accent);
   flex: 0 0 auto;
@@ -42,6 +46,10 @@
   color: var(--text-secondary);
   font-size: var(--fs-xs);
   margin-top: 2px;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbar {
@@ -164,39 +172,271 @@
   min-height: var(--control-h);
 }
 
-/* 导出范围条 */
-.export-scope {
-  align-items: center;
-  background: var(--bg-subtle);
-  border-bottom: 1px solid var(--border-subtle);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-3);
-  max-height: 104px;
-  min-height: 44px;
-  overflow-y: auto;
-  padding: var(--sp-2) var(--sp-6);
+/* 导出菜单：范围选择 + 导出目标，收纳进顶栏「导出」按钮 */
+.export-menu-anchor {
+  position: relative;
 }
 
-.export-scope-label {
+.export-menu {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  right: 0;
+  top: calc(var(--control-h) + var(--sp-2));
+  width: 400px;
+  z-index: 31;
+}
+
+.export-menu-scope {
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.export-menu-label {
   color: var(--text-secondary);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
 }
 
-.export-scope label {
+.scope-pills {
   align-items: center;
-  color: var(--text-primary);
-  display: inline-flex;
-  font-size: var(--fs-xs);
-  gap: var(--sp-1);
-  max-width: 220px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
 }
 
-.export-scope label span {
+.export-menu-summary {
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.export-menu-items {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-2);
+}
+
+.export-menu-items > button {
+  align-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  display: flex;
+  font-weight: var(--fw-regular);
+  gap: var(--sp-3);
+  justify-content: flex-start;
+  min-height: 52px;
+  padding: 0 var(--sp-3);
+  text-align: left;
+  white-space: normal;
+}
+
+.export-menu-items > button > svg {
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.export-menu-items > button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.export-menu-items > button:hover:not(:disabled) > svg {
+  color: var(--accent);
+}
+
+.export-menu-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.export-menu-item-main strong {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.export-menu-item-main small {
+  font-size: var(--fs-2xs);
+}
+
+.scope-pill {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-full);
+  color: var(--text-secondary);
+  display: inline-flex;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  gap: var(--sp-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--sp-3);
+}
+
+.scope-pill:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.scope-pill.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.scope-pill-count {
+  background: var(--accent);
+  border-radius: var(--r-full);
+  color: var(--text-inverse);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  min-width: 18px;
+  padding: 0 5px;
+  text-align: center;
+}
+
+.scope-pill .flip {
+  transform: rotate(180deg);
+}
+
+.scope-picker-anchor {
+  position: relative;
+}
+
+/* 点击弹层外关闭 */
+.popover-overlay {
+  inset: 0;
+  position: fixed;
+  z-index: 30;
+}
+
+/* 导出菜单内的章节选择弹层：要盖住菜单本体 */
+.popover-overlay.above-menu {
+  z-index: 32;
+}
+
+.chapter-picker {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  position: absolute;
+  top: calc(var(--control-h-sm) + var(--sp-2));
+  width: 440px;
+  z-index: 33;
+}
+
+/* 菜单内从胶囊右缘向左展开，避免溢出窗口右边缘 */
+.export-menu .chapter-picker {
+  left: auto;
+  right: 0;
+}
+
+.chapter-picker-toolbar {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.chapter-picker-search {
+  align-items: center;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-sm);
+  color: var(--text-tertiary);
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--sp-1);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--sp-2);
+}
+
+.chapter-picker-search input {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  flex: 1 1 auto;
+  font-size: var(--fs-xs);
+  min-height: var(--control-h-sm);
+  padding: 0;
+}
+
+.chapter-picker-search input:focus {
+  box-shadow: none;
+}
+
+.chapter-picker-list {
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-1) var(--sp-1);
+}
+
+.chapter-picker-row {
+  align-items: center;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  display: flex;
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  gap: var(--sp-2);
+  height: 32px;
+  padding: 0 var(--sp-2);
+}
+
+.chapter-picker-row:hover {
+  background: var(--bg-hover);
+}
+
+.chapter-picker-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chapter-picker-footer {
+  align-items: center;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  display: flex;
+  font-size: var(--fs-xs);
+  gap: var(--sp-3);
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.export-scope-summary {
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.compact {
+  min-height: var(--control-h-sm);
+  font-size: var(--fs-xs);
+  padding: 0 var(--sp-2);
 }
 
 /* 章节原文预览 */

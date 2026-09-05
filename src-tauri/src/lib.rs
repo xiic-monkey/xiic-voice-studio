@@ -311,6 +311,23 @@ fn update_segment(
 }
 
 #[tauri::command]
+fn delete_segment(
+    state: tauri::State<'_, AppState>,
+    segment_id: String,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let relative_paths = storage::delete_segment(&conn, &segment_id)?;
+    for relative_path in relative_paths {
+        // 音频文件尽力清理，失败不影响分段删除
+        if let Ok(path) = audio::resolve_audio_path(&root, &relative_path) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    storage::snapshot(&root)
+}
+
+#[tauri::command]
 fn list_characters(state: tauri::State<'_, AppState>) -> StudioResult<Vec<Character>> {
     let root = current_root(&state)?;
     let conn = storage::open_connection(&root)?;
@@ -748,23 +765,42 @@ async fn retry_job(
         .pointer("/forceRegenerate")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    storage::mark_job(&conn, &job_id, "canceled", 0.0, Some("已创建重试任务"))?;
-    let options = tts::TtsSynthesisOptions { force_regenerate };
-    let new_job_id = tts::create_tts_job(
-        &conn,
-        &job.project_id,
-        &segment_ids,
-        settings.as_ref(),
-        &options,
-    )?;
+    // 重试复用同一条任务记录：重置为待执行后再派发，避免失败任务越积越多
+    storage::mark_job(&conn, &job_id, "pending", 0.0, None)?;
     spawn_tts_batch(
         root.clone(),
         job.project_id,
-        new_job_id,
+        job_id.clone(),
         segment_ids,
         settings,
         force_regenerate,
     );
+    storage::list_jobs(&conn)
+}
+
+#[tauri::command]
+fn delete_job(
+    state: tauri::State<'_, AppState>,
+    job_id: String,
+) -> StudioResult<Vec<StudioJob>> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let job = storage::list_jobs(&conn)?
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| err("任务不存在，无法删除"))?;
+    if matches!(job.status.as_str(), "pending" | "running") {
+        return Err(err("任务进行中，请先取消再删除"));
+    }
+    storage::delete_job(&conn, &job_id)?;
+    storage::list_jobs(&conn)
+}
+
+#[tauri::command]
+fn clear_finished_jobs(state: tauri::State<'_, AppState>) -> StudioResult<Vec<StudioJob>> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    storage::clear_finished_jobs(&conn)?;
     storage::list_jobs(&conn)
 }
 
@@ -1212,6 +1248,7 @@ pub fn run() {
             mark_chapter,
             list_segments,
             update_segment,
+            delete_segment,
             list_characters,
             update_character,
             merge_characters,
@@ -1225,6 +1262,8 @@ pub fn run() {
             list_jobs,
             cancel_job,
             retry_job,
+            delete_job,
+            clear_finished_jobs,
             play_segment_audio,
             get_audio_output_directory,
             review_segment_audio,

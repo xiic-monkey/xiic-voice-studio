@@ -166,6 +166,16 @@ export function useStudioActions({
     await saveSegment(segment, { text: draft.text, segmentType: draft.segmentType, speaker: draft.speaker });
   }
 
+  async function deleteSegment(segment: Segment) {
+    if (!window.confirm(`删除分段 ${segment.orderIndex + 1}？其音频记录和审听备注会一并删除，磁盘上的音频文件也会清理。`)) return;
+    const saved = await run(
+      "删除分段",
+      () => invoke<StudioSnapshot>("delete_segment", { segmentId: segment.id }),
+      project.hydrateSnapshot,
+    );
+    if (saved) editor.drop(segment.id, editor.draftFor(segment));
+  }
+
   async function assignVoice(character?: { id: string; canonicalName: string }) {
     const defaults = providerDefaults[settings.tts.provider] ?? providerDefaults.mock;
     await run(
@@ -216,6 +226,22 @@ export function useStudioActions({
     await run(
       text.retryJob,
       () => invoke<StudioJob[]>("retry_job", { jobId }),
+      (jobs) => project.setSegmentJobs(jobs),
+    );
+  }
+
+  async function deleteJob(jobId: string) {
+    await run(
+      "删除任务记录",
+      () => invoke<StudioJob[]>("delete_job", { jobId }),
+      (jobs) => project.setSegmentJobs(jobs),
+    );
+  }
+
+  async function clearFinishedJobs() {
+    await run(
+      "清空已结束任务",
+      () => invoke<StudioJob[]>("clear_finished_jobs"),
       (jobs) => project.setSegmentJobs(jobs),
     );
   }
@@ -373,10 +399,13 @@ export function useStudioActions({
     markChapter,
     saveSegment,
     saveSegmentDraft,
+    deleteSegment,
     assignVoice,
     generateTts,
     cancelJob,
     retryJob,
+    deleteJob,
+    clearFinishedJobs,
     playAudio,
     uploadAudio,
     setAudioReviewStatus,

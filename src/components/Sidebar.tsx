@@ -1,8 +1,10 @@
-import { BookOpen, Eye, Save, Settings, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { BookOpen, Eye, Save, Search, Settings, Trash2 } from "lucide-react";
 import type { Chapter } from "../types";
 import { text } from "../constants";
 import { displayStatus } from "../utils";
 import { Panel } from "./ui";
+import { VirtualList } from "./VirtualList";
 
 type Props = {
   chapters: Chapter[];
@@ -31,6 +33,14 @@ export function Sidebar({
   onDeleteChapter,
   onOpenSettings,
 }: Props) {
+  const [search, setSearch] = useState("");
+
+  const filteredChapters = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return chapters;
+    return chapters.filter((chapter) => chapter.title.toLowerCase().includes(query));
+  }, [chapters, search]);
+
   return (
     <aside className="sidebar">
       <Panel title={text.project} icon={<BookOpen size={16} />} className="create-panel">
@@ -42,26 +52,38 @@ export function Sidebar({
         </button>
       </Panel>
 
-      <Panel title={text.chapters} className="chapters-panel">
-        <div className="chapter-list">
-          {chapters.map((chapter) => (
+      <Panel title={text.chapters} className="chapters-panel" count={`${chapters.length} 章`}>
+        <div className="chapter-search">
+          <Search size={14} />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="搜索章节"
+          />
+        </div>
+        <VirtualList
+          className="chapter-list"
+          items={filteredChapters}
+          rowHeight={36}
+          resetKey={search}
+          emptyState={<p className="empty">{chapters.length ? "没有匹配的章节" : text.emptyChapters}</p>}
+          renderItem={(chapter) => (
             <div key={chapter.id} className={`chapter-item ${chapter.id === activeChapterId ? "selected" : ""}`}>
-              <button className="chapter-select" onClick={() => onSelectChapter(chapter.id)}>
+              <button className="chapter-select" title={chapter.title} onClick={() => onSelectChapter(chapter.id)}>
                 <strong>{chapter.title}</strong>
-                <small>{displayStatus(chapter.scriptStatus)}</small>
               </button>
+              <span className="chapter-meta">{displayStatus(chapter.scriptStatus)}</span>
               <div className="chapter-item-actions">
-                <button title="查看章节原文" onClick={() => onPreviewChapter(chapter)}>
+                <button className="icon-button compact" title="查看章节原文" onClick={() => onPreviewChapter(chapter)}>
                   <Eye size={14} />
                 </button>
-                <button title="删除章节" onClick={() => onDeleteChapter(chapter)}>
+                <button className="icon-button compact" title="删除章节" onClick={() => onDeleteChapter(chapter)}>
                   <Trash2 size={14} />
                 </button>
               </div>
             </div>
-          ))}
-          {!chapters.length && <p className="empty">{text.emptyChapters}</p>}
-        </div>
+          )}
+        />
       </Panel>
 
       <div className="sidebar-footer">

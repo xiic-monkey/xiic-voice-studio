@@ -99,6 +99,8 @@ export type StudioJob = {
   status: string;
   progress: number;
   error?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type ProjectSummary = {

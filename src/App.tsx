@@ -155,6 +155,7 @@ function App() {
           onSelectSegment={project.setSelectedSegmentId}
           editor={editor}
           onSaveSegmentDraft={actions.saveSegmentDraft}
+          onDeleteSegment={actions.deleteSegment}
           exportScope={{
             allChapters: project.exportScope.allChapters,
             selectedIds: project.exportScope.selectedIds,
@@ -199,6 +200,8 @@ function App() {
             productionReport={productionReport}
             onCancelJob={actions.cancelJob}
             onRetryJob={actions.retryJob}
+            onDeleteJob={actions.deleteJob}
+            onClearFinishedJobs={actions.clearFinishedJobs}
           />
         </aside>
       </section>

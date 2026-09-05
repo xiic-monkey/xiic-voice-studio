@@ -484,6 +484,31 @@ pub fn list_jobs(conn: &Connection) -> StudioResult<Vec<StudioJob>> {
     collect_rows(rows)
 }
 
+pub fn delete_job(conn: &Connection, job_id: &str) -> StudioResult<()> {
+    conn.execute("DELETE FROM jobs WHERE id = ?1", params![job_id])?;
+    Ok(())
+}
+
+pub fn clear_finished_jobs(conn: &Connection) -> StudioResult<usize> {
+    let removed = conn.execute(
+        "DELETE FROM jobs WHERE status IN ('failed', 'canceled', 'succeeded')",
+        [],
+    )?;
+    Ok(removed)
+}
+
+/// 删除分段；返回其音频文件相对路径，供调用方清理磁盘文件。
+/// segment_audio 随外键级联删除；审听问题对分段是 SET NULL，显式清掉避免留下无主记录。
+pub fn delete_segment(conn: &Connection, segment_id: &str) -> StudioResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT relative_path FROM segment_audio WHERE segment_id = ?1")?;
+    let paths = stmt
+        .query_map(params![segment_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    conn.execute("DELETE FROM review_issues WHERE segment_id = ?1", params![segment_id])?;
+    conn.execute("DELETE FROM segments WHERE id = ?1", params![segment_id])?;
+    Ok(paths)
+}
+
 pub fn snapshot(root: &Path) -> StudioResult<StudioSnapshot> {
     let project = project_summary(root)?;
     let conn = open_connection(root)?;

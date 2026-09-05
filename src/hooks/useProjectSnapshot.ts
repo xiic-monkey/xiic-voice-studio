@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Chapter, Segment, StudioJob, StudioSnapshot } from "../types";
 import { invoke } from "../utils";
+import { createMockSnapshot, devPreviewEnabled } from "../dev/preview";
 
 /**
  * 项目快照、章节/分段选中态、导出范围。
@@ -8,7 +9,9 @@ import { invoke } from "../utils";
  * 避免每秒把整棵树重渲染一遍。
  */
 export function useProjectSnapshot(onProjectChanged?: () => void) {
-  const [snapshot, setSnapshot] = useState<StudioSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<StudioSnapshot | null>(() =>
+    devPreviewEnabled ? createMockSnapshot() : null,
+  );
   const [selectedChapterId, setSelectedChapterId] = useState<string>("");
   const [selectedSegmentId, setSelectedSegmentId] = useState<string>("");
   const [exportAllChapters, setExportAllChapters] = useState(true);

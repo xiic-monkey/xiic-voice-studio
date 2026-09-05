@@ -1,4 +1,4 @@
-import { FolderSearch, Library, Loader2, Mic2, Pencil, Play, Save, ShieldCheck, X } from "lucide-react";
+import { FolderSearch, Library, Loader2, Mic2, Pencil, Play, Save, ShieldCheck, Trash2, X } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { StudioSnapshot, VoiceAsset, VoiceProfile } from "../types";
 import { ageStageLabels } from "../constants";
@@ -102,6 +102,14 @@ export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, on
                             </button>
                             <button className="icon-button" title="编辑声音档案" onClick={() => voices.startEditingVoiceProfile(profile)}>
                               <Pencil size={15} />
+                            </button>
+                            <button
+                              className="icon-button"
+                              title={`删除 ${profile.name}`}
+                              onClick={() => voices.deleteVoiceProfile(profile)}
+                              disabled={Boolean(busy)}
+                            >
+                              <Trash2 size={15} />
                             </button>
                           </div>
                         </article>
