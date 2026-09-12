@@ -127,7 +127,11 @@ JSON 格式：
    - narration、sound_cue、transition、timing_anchor 的 speaker 必须是 null，旁白不是角色
    - speaker 只能填具体人物，禁止填"旁白""台词""众人""群众""路人""声音""男声""女声"这类泛称；无法确定说话人时填 null
    - 有身份但无姓名的配角是合法的 speaker：族人1、族人2、中年男人、店小二等。同身份的不同个体（族人1、族人2）是不同的人，编号必须原样保留、各自独立，禁止合并成同一个称呼
-4. characters：列出本章出场、有名字或有稳定称呼的故事角色，包括有身份无姓名的配角（族人1、族人2、中年男人等，每个编号单独一条，不要合并）。aliases 填同一角色的其他称呼（例如"药老"的别名是"药尘"）。不要收录旁白和纯泛称（众人、群众、人群、路人等）。"#},
+4. emotion 情绪规则：
+   - dialogue 和 inner_monologue 必须根据台词内容和上下文给出情绪，用以下固定词表：平静、温柔、愤怒、悲伤、喜悦、兴奋、紧张、恐惧、疑惑、坚定、疲惫、嘲讽、撒娇、冷漠、惊讶
+   - 情绪要看上下文：同一角色相邻的台词情绪可能递进或转折，不要机械地全部填同一个值
+   - narration、sound_cue、transition、timing_anchor 的 emotion 填 null
+5. characters：列出本章出场、有名字或有稳定称呼的故事角色，包括有身份无姓名的配角（族人1、族人2、中年男人等，每个编号单独一条，不要合并）。aliases 填同一角色的其他称呼（例如"药老"的别名是"药尘"）。不要收录旁白和纯泛称（众人、群众、人群、路人等）。"#},
             {"role": "user", "content": format!("请标注以下章节原文：\n\n{raw_text}")}
         ]
     });
@@ -156,8 +160,170 @@ JSON 格式：
     Ok(response_text)
 }
 
-pub async fn test_openai_compatible(settings: LlmSettings) -> StudioResult<String> {
+/// 截取文本开头用于规则归纳：非空行最多 400 行、最多 8000 字。
+pub fn excerpt_for_rule_detection(text: &str) -> String {
+    let mut lines = Vec::new();
+    let mut size = 0usize;
+    for line in text.lines().filter(|line| !line.trim().is_empty()).take(400) {
+        size += line.chars().count();
+        if size > 8000 {
+            break;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// 让 LLM 从文本样本归纳章节标题的正则。只做编译校验，命中合理性由调用方预览确认。
+/// `hint` 为可选的自然语言格式说明，用于引导模型（例如「章节标题形如『卷一· 初入江湖』」）。
+pub async fn detect_chapter_rule(
+    excerpt: &str,
+    hint: Option<&str>,
+    settings: LlmSettings,
+) -> StudioResult<String> {
+    let key_empty = settings
+        .api_key
+        .as_ref()
+        .map(|key| key.trim().is_empty())
+        .unwrap_or(true);
+    if key_empty {
+        return Err(err("未配置 LLM API Key，无法自动解析拆章规则"));
+    }
+    let hint_block = match hint {
+        Some(hint) if !hint.trim().is_empty() => {
+            format!("\n\n用户额外说明的分章格式（请优先满足）：{}", hint.trim())
+        }
+        _ => String::new(),
+    };
+    let system = r#"你是文本格式分析助手。分析给定小说文本的章节标题格式，返回 JSON：{"regex":"...","description":"..."}。regex 要求：
+1. Rust regex 语法，不支持反向引用和 lookaround
+2. 从行首匹配完整的章节标题行（用 ^ 开头）
+3. 应能匹配文本中所有章节标题，且尽量不匹配正文行
+4. 示例：文本用「第一章 xxx」「第二章 xxx」分章，返回 "^第[〇零0-9０-９一二三四五六七八九十百千两]+[章节回卷集部篇]"
+5. 文本用「1. 标题」「2. 标题」分章，返回 "^\\d{1,4}[.、．]\\s*\\S+"
+只返回 JSON，不要 Markdown 代码块和解释。"#;
+    let user = format!(
+        "请分析以下小说开头的分章规则：\n\n{excerpt}{hint_block}"
+    );
+    let body = json!({
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ]
+    });
+    let response_text = call_openai_compatible_json(body, settings).await?;
+    parse_detected_rule(&response_text)
+}
+
+async fn call_openai_compatible_json(body: Value, settings: LlmSettings) -> StudioResult<String> {
     let base_url = settings
+        .base_url
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    let model = settings.model.unwrap_or_else(|| "gpt-4.1-mini".to_string());
+    let mut body = body;
+    body["model"] = json!(model);
+    let base_url = base_url.trim_end_matches('/');
+    let endpoint = if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/chat/completions")
+    };
+    let client = llm_http_client()?;
+    let response = send_with_retries(&client, &endpoint, settings.api_key.unwrap_or_default(), &body).await?;
+    let status = response.status();
+    let response_text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(err(format!(
+            "LLM 请求失败（HTTP {status}）：{}",
+            response_text.chars().take(1000).collect::<String>()
+        )));
+    }
+    Ok(response_text)
+}
+
+fn parse_detected_rule(payload: &str) -> StudioResult<String> {
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|error| err(format!("LLM 拆章规则响应不是有效 JSON：{error}")))?;
+    let content = value
+        .pointer("/choices/0/message/content")
+        .ok_or_else(|| err("LLM 拆章规则响应缺少内容"))?;
+    let text = content
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            content.as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+        })
+        .ok_or_else(|| err("LLM 拆章规则响应格式异常"))?;
+    let start = text.find('{').ok_or_else(|| err("LLM 未返回拆章规则 JSON"))?;
+    let end = text.rfind('}').ok_or_else(|| err("LLM 未返回拆章规则 JSON"))?;
+    let rule: Value = serde_json::from_str(&text[start..=end])
+        .map_err(|error| err(format!("LLM 拆章规则 JSON 解析失败：{error}")))?;
+    let regex = rule
+        .get("regex")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| err("LLM 返回的拆章规则缺少 regex 字段"))?;
+    Ok(regex.to_string())
+}
+
+/// 通用文本补全：system + user，返回 assistant 文本内容。
+pub async fn chat_completion(
+    settings: LlmSettings,
+    system: &str,
+    user: &str,
+) -> StudioResult<String> {
+    let body = json!({
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ]
+    });
+    let response_text = call_openai_compatible_json(body, settings).await?;
+    let value: Value = serde_json::from_str(&response_text)
+        .map_err(|error| err(format!("LLM 响应不是有效 JSON：{error}")))?;
+    let content = value
+        .pointer("/choices/0/message/content")
+        .ok_or_else(|| err("LLM 响应缺少内容"))?;
+    let text = content
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            content.as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+        })
+        .ok_or_else(|| err("LLM 响应格式异常"))?;
+    Ok(text.trim().to_string())
+}
+
+/// 根据角色信息与台词样本，生成符合 Mimo voicedesign 最佳实践的音色描述。
+pub async fn generate_voice_description(
+    character_name: &str,
+    character_info: &str,
+    dialogue_samples: &str,
+    settings: LlmSettings,
+) -> StudioResult<String> {
+    let system = "你是中文有声书配音导演。根据角色的性别、年龄、性格与台词风格，为该角色撰写一段用于 TTS 音色设计的音色描述。要求：1-4 句中文，覆盖性别与年龄段、音色质感、说话语气、语速节奏；与角色性格和台词风格一致；只返回描述文本本身，不要任何前缀、引号或解释。";
+    let user = format!(
+        "角色：{character_name}\n角色资料：{character_info}\n台词样本：\n{dialogue_samples}"
+    );
+    let text = chat_completion(settings, system, &user).await?;
+    if text.trim().is_empty() {
+        return Err(err("LLM 未返回音色描述"));
+    }
+    Ok(text)
+}
+
+pub async fn test_openai_compatible(settings: LlmSettings) -> StudioResult<String> {    let base_url = settings
         .base_url
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
     let model = settings.model.unwrap_or_else(|| "gpt-4.1-mini".to_string());
@@ -469,7 +635,7 @@ fn pick_character_color(seed: &str) -> &'static str {
         "#2f80ed", "#27ae60", "#b55400", "#9b51e0", "#c0392b", "#118c8c",
     ];
     let hash = seed.bytes().map(u32::from).sum::<u32>();
-    &colors[(hash % colors.len() as u32) as usize]
+    colors[(hash % colors.len() as u32) as usize]
 }
 
 fn insert_character(conn: &Connection, project_id: &str, name: &str) -> StudioResult<String> {

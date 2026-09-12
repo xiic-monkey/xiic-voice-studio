@@ -26,8 +26,8 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
 docx-rs = "0.4"
-keyring = "3"
 quick-xml = "0.38"
+regex = "1"
 reqwest = { version = "0.12", features = ["blocking", "json", "stream"] }
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
 serde = { version = "1", features = ["derive"] }

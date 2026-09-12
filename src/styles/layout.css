@@ -9,6 +9,7 @@
   height: 100vh;
 }
 
+
 /* ---- 顶栏 ---- */
 .topbar {
   align-items: center;
@@ -153,6 +154,19 @@
 
 .surface-header h1 {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 左侧标题组在窄窗口下不挤压右侧操作区，长章节名以省略号收尾 */
+.surface-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .surface-header span {

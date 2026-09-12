@@ -23,15 +23,21 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
   const [llmModel, setLlmModel] = useState("gpt-4.1-mini");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [llmKeySaved, setLlmKeySaved] = useState(false);
+  // 钥匙串中的当前密钥（明文基线）：用于判断"输入框里的密钥"是否改动过
+  const [savedLlmKey, setSavedLlmKey] = useState<string | null>(null);
   const [ttsProvider, setTtsProvider] = useState("mimo");
   const [ttsApiKey, setTtsApiKey] = useState("");
   const [ttsKeySaved, setTtsKeySaved] = useState(false);
+  const [savedTtsKey, setSavedTtsKey] = useState<string | null>(null);
   const [ttsEndpoint, setTtsEndpoint] = useState(providerDefaults.mimo.endpoint);
   const [ttsModel, setTtsModel] = useState(providerDefaults.mimo.model);
   const [ttsVoiceId, setTtsVoiceId] = useState(providerDefaults.mimo.voiceId);
   const [ttsStylePrompt, setTtsStylePrompt] = useState(providerDefaults.mimo.stylePrompt);
   const [ffmpegPath, setFfmpegPath] = useState("");
   const [episodeFormat, setEpisodeFormat] = useState("m4b");
+  // workspace 不是表单字段：加载后原样持有、保存时原样带回，
+  // 否则 dirty 判断永远为真，且保存会重置记住的项目路径。
+  const [workspace, setWorkspace] = useState<AppSettings["workspace"]>({ lastProjectRoot: null });
   const [ttsTestPath, setTtsTestPath] = useState("");
   const [voiceCatalog, setVoiceCatalog] = useState<VoiceInfo[]>([]);
   const [savedSettingsJson, setSavedSettingsJson] = useState(() => JSON.stringify(defaultAppSettings));
@@ -55,6 +61,7 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
         setTtsStylePrompt(value.tts.stylePrompt);
         setFfmpegPath(value.audio.ffmpegPath);
         setEpisodeFormat(value.audio.episodeFormat);
+        setWorkspace(value.workspace ?? { lastProjectRoot: null });
         setSavedSettingsJson(JSON.stringify(value));
       })
       .catch((error) => setNotice(errorMessage(error)));
@@ -62,10 +69,12 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
       .then((value) => {
         setLlmApiKey(value ?? "");
         setLlmKeySaved(Boolean(value));
+        setSavedLlmKey(value ?? null);
       })
       .catch(() => {
         setLlmApiKey("");
         setLlmKeySaved(false);
+        setSavedLlmKey(null);
       });
   }, [desktopRuntime, setNotice]);
 
@@ -74,16 +83,19 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     let disposed = false;
     setTtsApiKey("");
     setTtsKeySaved(false);
+    setSavedTtsKey(null);
     invoke<string | null>("get_provider_api_key", { provider: ttsProvider })
       .then((value) => {
         if (disposed) return;
         setTtsApiKey(value ?? "");
         setTtsKeySaved(Boolean(value));
+        setSavedTtsKey(value ?? null);
       })
       .catch(() => {
         if (disposed) return;
         setTtsApiKey("");
         setTtsKeySaved(false);
+        setSavedTtsKey(null);
       });
     return () => {
       disposed = true;
@@ -132,6 +144,7 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
       llm: { baseUrl: llmBaseUrl, model: llmModel },
       tts: { provider: ttsProvider, endpoint: ttsEndpoint, model: ttsModel, voiceId: ttsVoiceId, stylePrompt: ttsStylePrompt },
       audio: { ffmpegPath, episodeFormat },
+      workspace,
     };
   }
 
@@ -228,7 +241,10 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     const saved = await run(text.savingApiKey, () =>
       invoke("save_provider_api_key", { provider: "llm-openai-compatible", apiKey: llmApiKey }),
     );
-    if (saved !== undefined) setLlmKeySaved(Boolean(llmApiKey.trim()));
+    if (saved !== undefined) {
+      setLlmKeySaved(Boolean(llmApiKey.trim()));
+      setSavedLlmKey(llmApiKey.trim() || null);
+    }
   }
 
   async function deleteLlmApiKey() {
@@ -238,6 +254,7 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     if (deleted !== undefined) {
       setLlmApiKey("");
       setLlmKeySaved(false);
+      setSavedLlmKey(null);
     }
   }
 
@@ -245,7 +262,10 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     const saved = await run(text.savingApiKey, () =>
       invoke("save_provider_api_key", { provider: ttsProvider, apiKey: ttsApiKey }),
     );
-    if (saved !== undefined) setTtsKeySaved(Boolean(ttsApiKey.trim()));
+    if (saved !== undefined) {
+      setTtsKeySaved(Boolean(ttsApiKey.trim()));
+      setSavedTtsKey(ttsApiKey.trim() || null);
+    }
   }
 
   async function deleteTtsApiKey() {
@@ -255,6 +275,7 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     if (deleted !== undefined) {
       setTtsApiKey("");
       setTtsKeySaved(false);
+      setSavedTtsKey(null);
     }
   }
 
@@ -265,9 +286,30 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
       return;
     }
     const value = appSettingsValue();
-    await run("保存设置", () => invoke<AppSettings>("save_app_settings", { value }), (saved) => {
-      setSavedSettingsJson(JSON.stringify(saved));
-    });
+    await run(
+      "保存设置",
+      async () => {
+        const saved = await invoke<AppSettings>("save_app_settings", { value });
+        // 密钥跟随「保存设置」一起写入钥匙串，避免用户只点一个按钮漏存密钥
+        const llmKey = llmApiKey.trim();
+        if (llmKey && llmKey !== savedLlmKey) {
+          await invoke("save_provider_api_key", { provider: "llm-openai-compatible", apiKey: llmKey });
+          setLlmKeySaved(true);
+          setSavedLlmKey(llmKey);
+        }
+        const ttsKey = ttsApiKey.trim();
+        if (ttsProvider !== "mock" && ttsKey && ttsKey !== savedTtsKey) {
+          await invoke("save_provider_api_key", { provider: ttsProvider, apiKey: ttsKey });
+          setTtsKeySaved(true);
+          setSavedTtsKey(ttsKey);
+        }
+        return saved;
+      },
+      (saved) => {
+        setSavedSettingsJson(JSON.stringify(saved));
+        setNotice("设置已保存，API Key 已写入系统钥匙串");
+      },
+    );
   }
 
   async function openTtsTestAudio() {
@@ -297,29 +339,33 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
     setTtsStylePrompt(defaults.stylePrompt);
   }
 
-  return {
-    llm: {
-      baseUrl: llmBaseUrl,
-      model: llmModel,
-      apiKey: llmApiKey,
-      keySaved: llmKeySaved,
-      check: llmCheck,
-      changeBaseUrl: (value: string) => {
-        setLlmBaseUrl(value);
-        resetLlmCheck();
+    // 密钥改动也算"未保存"：填了密钥（或改动过）就让「保存设置」可点
+    const llmKeyDirty = Boolean(llmApiKey.trim()) && llmApiKey.trim() !== savedLlmKey;
+    const ttsKeyDirty =
+      ttsProvider !== "mock" && Boolean(ttsApiKey.trim()) && ttsApiKey.trim() !== savedTtsKey;
+    return {
+      llm: {
+        baseUrl: llmBaseUrl,
+        model: llmModel,
+        apiKey: llmApiKey,
+        keySaved: llmKeySaved,
+        check: llmCheck,
+        changeBaseUrl: (value: string) => {
+          setLlmBaseUrl(value);
+          resetLlmCheck();
+        },
+        changeModel: (value: string) => {
+          setLlmModel(value);
+          resetLlmCheck();
+        },
+        changeApiKey: (value: string) => {
+          setLlmApiKey(value);
+          resetLlmCheck();
+        },
+        test: testLlm,
+        saveKey: saveLlmApiKey,
+        deleteKey: deleteLlmApiKey,
       },
-      changeModel: (value: string) => {
-        setLlmModel(value);
-        resetLlmCheck();
-      },
-      changeApiKey: (value: string) => {
-        setLlmApiKey(value);
-        resetLlmCheck();
-      },
-      test: testLlm,
-      saveKey: saveLlmApiKey,
-      deleteKey: deleteLlmApiKey,
-    },
     tts: {
       provider: ttsProvider,
       apiKey: ttsApiKey,
@@ -371,7 +417,8 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
       chooseFfmpeg,
       checkFfmpeg,
     },
-    settingsDirty: savedSettingsJson !== JSON.stringify(appSettingsValue()),
+    settingsDirty:
+      savedSettingsJson !== JSON.stringify(appSettingsValue()) || llmKeyDirty || ttsKeyDirty,
     saveApplicationSettings,
     ttsSettings,
   };

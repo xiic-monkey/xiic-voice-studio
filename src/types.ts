@@ -35,6 +35,10 @@ export type SegmentDraft = {
   text: string;
   segmentType: SegmentType;
   speaker: string;
+  /** 绑定的角色；空字符串表示旁白 */
+  characterId?: string;
+  /** 台词情绪，由标注给出、可人工调整 */
+  emotion?: string;
 };
 
 export type Character = {
@@ -99,6 +103,7 @@ export type StudioJob = {
   status: string;
   progress: number;
   error?: string;
+  payloadJson?: string;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -127,12 +132,30 @@ export type StudioSnapshot = {
   jobs: StudioJob[];
 };
 
+export type SplitRuleDto = {
+  id: string;
+  label: string;
+  pattern: string;
+  description: string;
+};
+
+/** 导入前拆章预览：章节数、样例标题、实际命中的标题行、规则来源。 */
+export type SplitPreview = {
+  chapterCount: number;
+  sampleTitles: string[];
+  matchedLines: string[];
+  /** "pattern" 给定正则 / "heuristic" 启发式 / "single" 未拆分 */
+  ruleSource: string;
+};
+
 export type ProviderSettings = {
   provider: string;
   apiKey?: string;
   endpoint?: string;
   model?: string;
 };
+
+export type VoiceStability = "clone" | "preset" | "design" | "none";
 
 export type AppSettings = {
   schemaVersion: number;
@@ -145,6 +168,8 @@ export type AppSettings = {
     stylePrompt: string;
   };
   audio: { ffmpegPath: string; episodeFormat: string };
+  /** 保存时必须原样带回，否则会重置记住的项目路径 */
+  workspace: { lastProjectRoot?: string | null };
 };
 
 export type SettingsSection = "llm" | "tts" | "audio" | "export";

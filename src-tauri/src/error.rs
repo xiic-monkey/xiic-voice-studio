@@ -17,8 +17,6 @@ pub enum StudioError {
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
-    Keyring(#[from] keyring::Error),
-    #[error(transparent)]
     Walkdir(#[from] walkdir::Error),
 }
 

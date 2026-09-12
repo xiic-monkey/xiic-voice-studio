@@ -1,7 +1,20 @@
-import { useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, Library, Mic2, Pencil, RefreshCw, Save, Sparkles, Trash2, UserRound, X } from "lucide-react";
-import type { StudioSnapshot, VoiceProfile } from "../types";
-import { ageStages, ageStageLabels, reviewIssueLabels, text } from "../constants";
+import { useEffect, useState } from "react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Combine,
+  Library,
+  Mic2,
+  Pencil,
+  RefreshCw,
+  Save,
+  Trash2,
+  UserRound,
+  X,
+} from "lucide-react";
+import type { StudioSnapshot, VoiceProfile, VoiceStability } from "../types";
+import { MIMO_PRESET_VOICES, reviewIssueLabels, text } from "../constants";
 import { displayJobType, displayStatus } from "../utils";
 import type { CharactersController } from "../hooks/useCharacters";
 import type { ReviewIssueType } from "../types";
@@ -12,31 +25,142 @@ import { EmptyState, Panel } from "./ui";
 type CharacterPanelProps = {
   snapshot: StudioSnapshot | null;
   characters: CharactersController;
-  onAssignVoice: (character?: { id: string; canonicalName: string }) => void;
+  busy: string;
+  onSetCharacterVoice: (characterId: string, voiceId: string) => void;
+  onDesignVoice: (characterId: string, characterName: string) => void;
+  onFinalizeCharacterVoice: (characterId: string) => void;
 };
 
-export function CharacterPanel({ snapshot, characters, onAssignVoice }: CharacterPanelProps) {
-  const list = snapshot?.characters ?? [];
+/** 角色声音的稳定性：预置 ID 和克隆样本可保证一致；描述式音色每次生成可能不同 */
+function voiceStability(profile: VoiceProfile | undefined): VoiceStability {
+  if (!profile) return "none";
+  if (profile.voiceAssetId) return "clone";
+  if (MIMO_PRESET_VOICES.includes(profile.voiceId)) return "preset";
+  return "design";
+}
+
+/** 角色音色选择：预置音色 ID 直接绑定（稳定）；描述式的当前值保留为选项并配警告 */
+function CharacterVoiceSelect({
+  characterId,
+  voiceId,
+  busy,
+  onSave,
+}: {
+  characterId: string;
+  voiceId: string;
+  busy: string;
+  onSave: (characterId: string, voiceId: string) => void;
+}) {
+  const isPreset = MIMO_PRESET_VOICES.includes(voiceId);
   return (
-    <Panel title={text.characters} icon={<UserRound size={16} />}>
+    <select
+      className="character-voice-input"
+      aria-label="角色音色"
+      value={voiceId}
+      disabled={Boolean(busy)}
+      onClick={(event) => event.stopPropagation()}
+      onChange={(event) => onSave(characterId, event.target.value)}
+    >
+      {!isPreset && voiceId !== "" && <option value={voiceId}>当前描述（音色不稳定）</option>}
+      {MIMO_PRESET_VOICES.filter((preset) => preset !== "mimo_default").map((preset) => (
+        <option key={preset} value={preset}>
+          {preset}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice, onDesignVoice, onFinalizeCharacterVoice }: CharacterPanelProps) {
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const list = snapshot?.characters ?? [];
+  const profiles = snapshot?.voiceProfiles ?? [];
+  return (
+    <Panel
+      title={text.characters}
+      icon={<UserRound size={16} />}
+      className="character-panel"
+      action={
+        <button
+          className="icon-button compact"
+          title="合并角色"
+          onClick={() => setMergeOpen((open) => !open)}
+        >
+          <Combine size={14} />
+        </button>
+      }
+    >
+      {mergeOpen && (
+        <>
+          <div className="popover-overlay" onClick={() => setMergeOpen(false)} />
+          <div className="character-merge-popover">
+            <div className="merge-popover-title">合并角色</div>
+            <select value={characters.mergeSourceId} onChange={(event) => characters.setMergeSourceId(event.target.value)}>
+              <option value="">{text.sourceCharacter}</option>
+              {list.map((character) => (
+                <option key={character.id} value={character.id}>{character.canonicalName}</option>
+              ))}
+            </select>
+            <select value={characters.mergeTargetId} onChange={(event) => characters.setMergeTargetId(event.target.value)}>
+              <option value="">{text.targetCharacter}</option>
+              {list.map((character) => (
+                <option key={character.id} value={character.id}>{character.canonicalName}</option>
+              ))}
+            </select>
+            <button
+              className="primary-action compact"
+              onClick={characters.mergeCharacters}
+              disabled={!characters.mergeSourceId || !characters.mergeTargetId || characters.mergeSourceId === characters.mergeTargetId}
+            >
+              <UserRound size={14} />
+              合并
+            </button>
+            <p className="merge-hint">来源角色的分段与别名会并入目标角色</p>
+          </div>
+        </>
+      )}
       <div className="character-list">
-        {list.map((character) => (
+        {list.map((character) => {
+          const boundProfile = profiles.find((voice) => voice.characterId === character.id);
+          const stability = voiceStability(boundProfile);
+          return (
           <div className="character-card" key={character.id}>
             <span className="swatch" style={{ backgroundColor: character.defaultColor }} />
             <div>
               <strong>{character.canonicalName}</strong>
               <small>{character.aliases.join(", ") || text.noAliases}</small>
+              {stability === "clone" ? (
+                <small className="character-voice-fixed">已固化（克隆音色，音色稳定）</small>
+              ) : (
+                <CharacterVoiceSelect
+                  characterId={character.id}
+                  voiceId={boundProfile?.voiceId ?? ""}
+                  busy={busy}
+                  onSave={onSetCharacterVoice}
+                />
+              )}
+              {stability === "design" && (
+                <div className="voice-stability-warn">
+                  <span>描述式音色每次生成可能不同</span>
+                  <div className="voice-stability-actions">
+                    <button className="ghost compact" onClick={() => onDesignVoice(character.id, character.canonicalName)}>
+                      生成样本
+                    </button>
+                    <button className="ghost compact" onClick={() => onFinalizeCharacterVoice(character.id)}>
+                      固化音色
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
             <div className="character-card-actions">
               <button title="编辑角色" onClick={() => characters.startEditingCharacter(character)}>
                 <Pencil size={14} />
               </button>
-              <button title={text.assignVoice} onClick={() => onAssignVoice(character)}>
-                <Mic2 size={15} />
-              </button>
             </div>
           </div>
-        ))}
+          );
+        })}
         {!list.length && <p className="empty">{text.emptyCharacters}</p>}
       </div>
       {characters.editingCharacterId && (
@@ -81,71 +205,70 @@ export function CharacterPanel({ snapshot, characters, onAssignVoice }: Characte
           </div>
         </div>
       )}
-      {list.length >= 2 && (
-        <div className="merge-controls">
-          <select value={characters.mergeSourceId} onChange={(event) => characters.setMergeSourceId(event.target.value)}>
-            <option value="">{text.sourceCharacter}</option>
-            {list.map((character) => (
-              <option key={character.id} value={character.id}>{character.canonicalName}</option>
-            ))}
-          </select>
-          <select value={characters.mergeTargetId} onChange={(event) => characters.setMergeTargetId(event.target.value)}>
-            <option value="">{text.targetCharacter}</option>
-            {list.map((character) => (
-              <option key={character.id} value={character.id}>{character.canonicalName}</option>
-            ))}
-          </select>
-          <button
-            onClick={characters.mergeCharacters}
-            disabled={!characters.mergeSourceId || !characters.mergeTargetId || characters.mergeSourceId === characters.mergeTargetId}
-          >
-            <UserRound size={15} />
-            {text.mergeCharacters}
-          </button>
-        </div>
-      )}
     </Panel>
   );
 }
+
 
 /* ---------- 声音面板 ---------- */
 
 type VoicePanelProps = {
   snapshot: StudioSnapshot | null;
-  onAssignNarrator: () => void;
+  busy: string;
+  onSetNarratorVoice: (voiceId: string) => void;
   onOpenVoiceCenter: () => void;
 };
 
-export function VoicePanel({ snapshot, onAssignNarrator, onOpenVoiceCenter }: VoicePanelProps) {
-  const profiles = snapshot?.voiceProfiles ?? [];
+export function VoicePanel({ snapshot, busy, onSetNarratorVoice, onOpenVoiceCenter }: VoicePanelProps) {
+  const narratorProfile = (snapshot?.voiceProfiles ?? []).find((voice) => !voice.characterId);
   return (
     <Panel title={text.voices} icon={<Mic2 size={16} />}>
       <div className="voice-panel-actions">
-        <button onClick={onAssignNarrator} disabled={!snapshot} title={text.addNarratorVoice}>
-          <Sparkles size={16} />
-          旁白
-        </button>
         <button className="primary-action" onClick={onOpenVoiceCenter} disabled={!snapshot}>
           <Library size={16} />
-          声音中心
+          音色模仿
         </button>
       </div>
       <div className="voice-list">
-        {profiles.map((voice: VoiceProfile) => (
-          <div className="voice-card" key={voice.id}>
-            <div className="voice-card-main">
-              <strong>{voice.name}</strong>
-              <small>{voice.ttsProvider} · {voice.voiceId}</small>
-            </div>
-            <select value={voice.ageStage} disabled aria-label={`${voice.name} 的年龄阶段`}>
-              {ageStages.map((stage) => (
-                <option key={stage} value={stage}>{ageStageLabels[stage] ?? stage}</option>
-              ))}
-            </select>
+        <div className="voice-card">
+          <div className="voice-card-main">
+            <strong>旁白</strong>
+            <small>叙述、转场等非角色分段统一使用</small>
+            <NarratorVoiceInput
+              voiceId={narratorProfile?.voiceId ?? ""}
+              busy={busy}
+              onSave={onSetNarratorVoice}
+            />
           </div>
-        ))}
+        </div>
       </div>
     </Panel>
+  );
+}
+
+function NarratorVoiceInput({
+  voiceId,
+  busy,
+  onSave,
+}: {
+  voiceId: string;
+  busy: string;
+  onSave: (voiceId: string) => void;
+}) {
+  const [draft, setDraft] = useState(voiceId);
+  useEffect(() => setDraft(voiceId), [voiceId]);
+  return (
+    <input
+      className="character-voice-input"
+      value={draft}
+      placeholder="旁白音色 ID"
+      spellCheck={false}
+      disabled={Boolean(busy)}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        if (draft !== voiceId) onSave(draft);
+      }}
+    />
   );
 }
 
@@ -269,6 +392,21 @@ function canRetryJob(job: Job) {
   return job.jobType === "tts_batch";
 }
 
+/** 从任务 payload 解读触发来源，让队列卡片可读 */
+function describeJobTrigger(job: Job): string | null {
+  try {
+    const payload = JSON.parse(job.payloadJson ?? "null") as Record<string, unknown> | null;
+    if (!payload) return null;
+    if (job.jobType === "tts_batch" && Array.isArray(payload.segmentIds)) {
+      return `${payload.segmentIds.length} 个分段`;
+    }
+    if (job.jobType === "mark_chapter") return "整章标注";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob, onDeleteJob, onClearFinishedJobs }: JobPanelProps) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const { active, attention, done } = groupJobs(snapshot?.jobs ?? []);
@@ -299,7 +437,7 @@ export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob, 
           {active.map((job) => (
             <div className="job-card" key={job.id}>
               <div className="job-card-main">
-                <strong>{displayJobType(job.jobType)}</strong>
+                <strong>{displayJobType(job.jobType)}{describeJobTrigger(job) ? ` · ${describeJobTrigger(job)}` : ""}</strong>
                 <div className="job-progress">
                   <span style={{ width: `${Math.round(job.progress * 100)}%` }} />
                 </div>
@@ -368,8 +506,8 @@ export function JobPanel({ snapshot, productionReport, onCancelJob, onRetryJob, 
         </div>
       )}
 
-      {!active.length && !attention.length && !done.length && !productionReport && (
-        <EmptyState>暂无任务</EmptyState>
+      {!active.length && !attention.length && !done.length && (
+        <EmptyState>生成语音、标注章节或导出成品时，任务进度会显示在这里</EmptyState>
       )}
     </Panel>
   );

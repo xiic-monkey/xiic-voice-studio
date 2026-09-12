@@ -14,6 +14,7 @@ type Props = {
   onSectionChange: (section: SettingsSection) => void;
   onLeave: () => void;
   busy: string;
+  notice: string;
   snapshot: StudioSnapshot | null;
   settings: AppSettingsController;
   projectCoverPath: string;
@@ -38,6 +39,7 @@ export function SettingsView({
   onSectionChange,
   onLeave,
   busy,
+  notice,
   snapshot,
   settings,
   projectCoverPath,
@@ -93,6 +95,15 @@ export function SettingsView({
           </div>
         </header>
         <div className="settings-content">
+          {notice && (
+            <div className="runtime-notice" role="alert">
+              <ShieldCheck size={17} />
+              <div>
+                <strong>操作结果</strong>
+                <span>{notice}</span>
+              </div>
+            </div>
+          )}
           {!desktopRuntime && (
             <div className="runtime-notice" role="status">
               <ShieldCheck size={17} />

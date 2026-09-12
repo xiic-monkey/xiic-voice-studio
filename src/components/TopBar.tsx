@@ -49,7 +49,7 @@ export function TopBar({
           <Wand2 size={17} />
           {text.mark}
         </button>
-        <button title="生成当前分段语音" onClick={onGenerateAll} disabled={!canGenerate}>
+        <button title="TTS 录制：为当前章节的所有分段生成语音，进度见右侧任务队列" onClick={onGenerateAll} disabled={!canGenerate}>
           <Mic2 size={17} />
           {text.generate}
         </button>

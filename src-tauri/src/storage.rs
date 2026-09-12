@@ -213,6 +213,8 @@ pub fn migrate(conn: &Connection) -> StudioResult<()> {
     )?;
     ensure_column(conn, "voice_profiles", "model", "TEXT")?;
     ensure_column(conn, "voice_profiles", "voice_asset_id", "TEXT")?;
+    ensure_column(conn, "voice_profiles", "created_at", "TEXT")?;
+    ensure_column(conn, "voice_profiles", "updated_at", "TEXT")?;
     Ok(())
 }
 
@@ -394,6 +396,22 @@ pub fn list_characters(conn: &Connection) -> StudioResult<Vec<Character>> {
     collect_rows(rows)
 }
 
+/// 把声音档案绑定到角色（character_id 为 None 表示解绑）。
+pub fn bind_voice_profile(
+    conn: &Connection,
+    profile_id: &str,
+    character_id: Option<&str>,
+) -> StudioResult<()> {
+    let changed = conn.execute(
+        "UPDATE voice_profiles SET character_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![character_id, now(), profile_id],
+    )?;
+    if changed == 0 {
+        return Err(err("声音档案不存在，无法绑定"));
+    }
+    Ok(())
+}
+
 pub fn list_voice_profiles(conn: &Connection) -> StudioResult<Vec<VoiceProfile>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, voice_asset_id, speed, pitch, style
@@ -488,6 +506,8 @@ pub fn delete_job(conn: &Connection, job_id: &str) -> StudioResult<()> {
     conn.execute("DELETE FROM jobs WHERE id = ?1", params![job_id])?;
     Ok(())
 }
+
+
 
 pub fn clear_finished_jobs(conn: &Connection) -> StudioResult<usize> {
     let removed = conn.execute(

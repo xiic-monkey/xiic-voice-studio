@@ -6,6 +6,7 @@ function fallbackDraft(segment: Segment): SegmentDraft {
     text: segment.text,
     segmentType: segment.segmentType,
     speaker: segment.speaker ?? "",
+    characterId: segment.characterId ?? "",
   };
 }
 
@@ -35,7 +36,9 @@ export function useSegmentEditor() {
         currentDraft &&
         (currentDraft.text !== submitted.text ||
           currentDraft.segmentType !== submitted.segmentType ||
-          currentDraft.speaker !== submitted.speaker)
+          currentDraft.speaker !== submitted.speaker ||
+          (currentDraft.characterId ?? "") !== (submitted.characterId ?? "") ||
+        (currentDraft.emotion ?? "") !== (submitted.emotion ?? ""))
       ) {
         return current;
       }

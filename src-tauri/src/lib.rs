@@ -12,11 +12,13 @@ mod tts;
 use crate::domain::*;
 use crate::error::{err, StudioResult};
 use crate::storage::now;
-use keyring::{Entry, Error as KeyringError};
+use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+use base64::Engine as _;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 use uuid::Uuid;
 
@@ -37,6 +39,8 @@ struct CreateProjectRequest {
 #[serde(rename_all = "camelCase")]
 struct ImportSourceRequest {
     source_path: String,
+    /// None：默认启发式自动识别；Some：用户选择/输入的正则
+    chapter_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +50,8 @@ struct UpdateSegmentRequest {
     text: String,
     segment_type: SegmentType,
     speaker: Option<String>,
+    /// 绑定到的角色；空字符串或 None 表示旁白（落到旁白声音档案）。
+    character_id: Option<String>,
     emotion: Option<String>,
     sound_cue: Option<String>,
     anchor: Option<String>,
@@ -145,6 +151,17 @@ struct UploadSegmentAudioRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SaveSegmentRecordingRequest {
+    segment_id: String,
+    /// MediaRecorder 产出的音频，base64 编码
+    data_base64: String,
+    /// 如 audio/webm;codecs=opus、audio/mp4、audio/wav
+    mime_type: String,
+    ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SegmentAudioStatusRequest {
     segment_id: String,
     status: String,
@@ -161,12 +178,14 @@ const LLM_KEYCHAIN_ID: &str = "llm-openai-compatible";
 
 #[tauri::command]
 fn create_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     request: CreateProjectRequest,
 ) -> StudioResult<StudioSnapshot> {
     let root = PathBuf::from(request.root_path);
     let summary = storage::create_project(&root, &request.title, request.author)?;
     *state.project_root.lock().expect("project root lock") = Some(root.clone());
+    persist_last_project_root(&app, &root);
     let conn = storage::open_connection(&root)?;
     tts::ensure_default_voice_profiles(&conn, &summary.manifest.id)?;
     storage::snapshot(&root)
@@ -174,6 +193,7 @@ fn create_project(
 
 #[tauri::command]
 fn open_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     root_path: String,
 ) -> StudioResult<StudioSnapshot> {
@@ -182,7 +202,29 @@ fn open_project(
     storage::recover_incomplete_jobs(&conn)?;
     tts::ensure_default_voice_profiles(&conn, &manifest.id)?;
     *state.project_root.lock().expect("project root lock") = Some(root.clone());
+    persist_last_project_root(&app, &root);
     storage::snapshot(&root)
+}
+
+/// 记住最近打开的项目目录，下次启动自动恢复。失败不打扰用户（仅是便利功能）。
+fn persist_last_project_root(app: &tauri::AppHandle, root: &Path) {
+    let Ok(config_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    let Ok(mut settings) = settings::load(&config_dir) else {
+        return;
+    };
+    settings.workspace.last_project_root = Some(root.to_string_lossy().to_string());
+    let _ = settings::save(&config_dir, &settings);
+}
+
+#[tauri::command]
+fn get_last_project_root(app: tauri::AppHandle) -> Option<String> {
+    let config_dir = app.path().app_config_dir().ok()?;
+    settings::load(&config_dir)
+        .ok()?
+        .workspace
+        .last_project_root
 }
 
 #[tauri::command]
@@ -195,9 +237,65 @@ fn import_source(
     let source_path = PathBuf::from(&request.source_path);
     let imported = importer::read_source(&source_path)?;
     copy_source_asset(&source_path, &root)?;
-    importer::import_source(&conn, &manifest.id, &imported)?;
+    let pattern = match request.chapter_pattern.as_deref() {
+        Some(pattern) => Some(importer::compile_split_pattern(pattern)?),
+        None => importer::detect_chapter_pattern(&imported.text),
+    };
+    importer::import_source_with_pattern(&conn, &manifest.id, &imported, pattern.as_ref())?;
     tts::ensure_default_voice_profiles(&conn, &manifest.id)?;
     storage::snapshot(&root)
+}
+
+#[tauri::command]
+fn list_chapter_rules() -> StudioResult<Vec<importer::SplitRuleDto>> {
+    Ok(importer::split_rule_dtos())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewSplitRequest {
+    source_path: String,
+    chapter_pattern: Option<String>,
+}
+
+#[tauri::command]
+fn preview_chapter_split(
+    request: PreviewSplitRequest,
+) -> StudioResult<importer::SplitPreview> {
+    // 预览不依赖已打开的项目，独立连接只读文件即可
+    let imported = importer::read_source(Path::new(&request.source_path))?;
+    let pattern = match request.chapter_pattern.as_deref() {
+        Some(pattern) => Some(importer::compile_split_pattern(pattern)?),
+        None => importer::detect_chapter_pattern(&imported.text),
+    };
+    Ok(importer::preview_split(&imported.text, pattern.as_ref()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DetectChapterRuleRequest {
+    source_path: String,
+    /// 可选的自然语言格式说明，引导 LLM 归纳正则
+    hint: Option<String>,
+    settings: Option<ai::LlmSettings>,
+}
+
+#[tauri::command]
+async fn detect_chapter_rule(
+    request: DetectChapterRuleRequest,
+) -> StudioResult<String> {
+    let settings = llm_settings_with_stored_key(request.settings)?;
+    let imported = importer::read_source(Path::new(&request.source_path))?;
+    let excerpt = ai::excerpt_for_rule_detection(&imported.text);
+    let pattern = ai::detect_chapter_rule(
+        &excerpt,
+        request.hint.as_deref(),
+        settings.ok_or_else(|| err("请先在设置中配置 LLM 标注"))?,
+    )
+    .await?;
+    // 编译通过才返回，语法错误直接暴露给用户
+    importer::compile_split_pattern(&pattern)?;
+    Ok(pattern)
 }
 
 #[tauri::command]
@@ -225,12 +323,10 @@ async fn mark_chapter(
     settings: Option<ai::LlmSettings>,
 ) -> StudioResult<StudioSnapshot> {
     let root = current_root(&state)?;
+    let (manifest, conn) = storage::ensure_project_loaded(&root)?;
     let settings = llm_settings_with_stored_key(settings)?;
-    let (project_id, prepared) = {
-        let (manifest, conn) = storage::ensure_project_loaded(&root)?;
-        let prepared = ai::prepare_mark_chapter(&conn, &manifest.id, &chapter_id, settings)?;
-        (manifest.id, prepared)
-    };
+    let prepared = ai::prepare_mark_chapter(&conn, &manifest.id, &chapter_id, settings)?;
+    let project_id = manifest.id;
     let job_id = prepared.job_id.clone();
     let provider_payload = match (prepared.raw_text.as_deref(), prepared.settings) {
         (Some(raw_text), Some(settings)) => {
@@ -287,12 +383,26 @@ fn update_segment(
         || current.3 != request.emotion
         || current.4 != request.sound_cue
         || current.5 != request.anchor;
+
+    // 角色绑定：选角色即带出其首选声音；选旁白（空）落到旁白声音档案。
+    let character_id = request.character_id.filter(|value| !value.trim().is_empty());
+    let project_id: String = conn.query_row(
+        "SELECT c.project_id FROM segments s JOIN chapters c ON c.id = s.chapter_id WHERE s.id = ?1",
+        params![request.segment_id],
+        |row| row.get(0),
+    )?;
+    let voice_profile_id: Option<String> = match &character_id {
+        Some(character_id) => tts::preferred_voice_profile_for_character(&conn, character_id)?,
+        None => Some(tts::ensure_default_narrator_profile(&conn, &project_id)?),
+    };
     conn.execute(
-        "UPDATE segments SET text = ?1, segment_type = ?2, speaker = ?3, emotion = ?4, sound_cue = ?5, anchor = ?6, is_manual_edit = 1, updated_at = ?7 WHERE id = ?8",
+        "UPDATE segments SET text = ?1, segment_type = ?2, speaker = ?3, character_id = ?4, voice_profile_id = ?5, emotion = ?6, sound_cue = ?7, anchor = ?8, is_manual_edit = 1, updated_at = ?9 WHERE id = ?10",
         params![
             request.text,
             request.segment_type.as_str(),
             request.speaker,
+            character_id,
+            voice_profile_id,
             request.emotion,
             request.sound_cue,
             request.anchor,
@@ -659,7 +769,10 @@ async fn enqueue_tts_batch(
 }
 
 #[tauri::command]
-async fn test_tts(app: tauri::AppHandle, request: TtsTestRequest) -> StudioResult<String> {
+async fn test_tts(
+    app: tauri::AppHandle,
+    request: TtsTestRequest,
+) -> StudioResult<String> {
     let settings = provider_settings_with_stored_key(request.settings)?;
     let output_dir = app
         .path()
@@ -672,6 +785,223 @@ async fn test_tts(app: tauri::AppHandle, request: TtsTestRequest) -> StudioResul
     .await
     .map_err(|error| err(format!("TTS 测试任务异常：{error}")))??;
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateVoiceDescriptionRequest {
+    character_id: String,
+    settings: Option<ai::LlmSettings>,
+}
+
+/// 根据角色资料与台词样本，让 LLM 生成 voicedesign 音色描述。
+#[tauri::command]
+async fn generate_voice_description(
+    state: tauri::State<'_, AppState>,
+    request: GenerateVoiceDescriptionRequest,
+) -> StudioResult<String> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let settings = llm_settings_with_stored_key(request.settings)?.ok_or_else(|| err("请先在设置中配置 LLM 标注"))?;
+    let (name, notes): (String, Option<String>) = conn.query_row(
+        "SELECT canonical_name, notes FROM characters WHERE id = ?1",
+        params![request.character_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let aliases: String = conn
+        .query_row(
+            "SELECT COALESCE(GROUP_CONCAT(alias, '、'), '') FROM character_aliases WHERE character_id = ?1",
+            params![request.character_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    let dialogues: Vec<String> = storage::list_segments(&conn, None)?
+        .iter()
+        .filter(|segment| {
+            segment.character_id.as_deref() == Some(request.character_id.as_str())
+                && segment.segment_type.as_str() == "dialogue"
+        })
+        .take(5)
+        .map(|segment| segment.text.clone())
+        .collect();
+    let dialogue_samples = if dialogues.is_empty() {
+        "（暂无台词样本）".to_string()
+    } else {
+        dialogues.join("\n")
+    };
+    let character_info = format!(
+        "别名：{aliases}；备注：{}",
+        notes.as_deref().unwrap_or("无")
+    );
+    ai::generate_voice_description(&name, &character_info, &dialogue_samples, settings).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateVoiceSampleRequest {
+    character_id: String,
+    description: String,
+    sample_text: String,
+    settings: Option<tts::ProviderSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedVoiceSample {
+    asset_id: String,
+    audio_path: String,
+}
+
+/// 用 voicedesign 按描述合成一段角色声音样本，存为项目音色资产（试听用）。
+#[tauri::command]
+async fn generate_character_voice_sample(
+    state: tauri::State<'_, AppState>,
+    request: GenerateVoiceSampleRequest,
+) -> StudioResult<GeneratedVoiceSample> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let (manifest, _) = storage::ensure_project_loaded(&root)?;
+    let description = request.description.trim();
+    if description.is_empty() {
+        return Err(err("请先填写音色描述"));
+    }
+    let sample_text = request.sample_text.trim();
+    if sample_text.is_empty() {
+        return Err(err("请先填写试听台词"));
+    }
+    let settings = provider_settings_with_stored_key(request.settings)?
+        .ok_or_else(|| err("请先在设置中配置 TTS 生成"))?;
+    if settings.provider != "mimo" {
+        return Err(err("音色设计流程仅支持 Mimo（voicedesign + voiceclone）"));
+    }
+    let provider = tts::provider_from_settings(Some(settings.clone()));
+    if provider.provider_id() != "mimo" {
+        return Err(err("音色设计流程仅支持 Mimo"));
+    }
+    let tts_request = tts::TtsRequest {
+        segment_id: format!("voice-design-{}", request.character_id),
+        text: sample_text.to_string(),
+        tts_provider: "mimo".to_string(),
+        model: Some("mimo-v2.5-tts-voicedesign".to_string()),
+        voice_id: String::new(),
+        voice_sample: None,
+        speed: 1.0,
+        pitch: 0.0,
+        style: Some(description.to_string()),
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || provider.synthesize_blocking(&tts_request))
+        .await
+        .map_err(|error| err(format!("音色样本合成任务异常：{error}")))??;
+
+    let asset_id = uuid::Uuid::new_v4().to_string();
+    let relative_path = format!("assets/source/voices/{asset_id}.wav");
+    let destination = root.join(&relative_path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&destination, &result.audio_bytes)?;
+    let timestamp = storage::now();
+    conn.execute(
+        "INSERT INTO voice_assets
+         (id, project_id, name, asset_type, provider, model, relative_path, mime_type,
+          source_file_name, consent_confirmed, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'voice_design_sample', 'mimo', 'mimo-v2.5-tts-voicedesign', ?4, 'audio/wav', ?5, 1, 'ready', ?6, ?7)",
+        params![
+            asset_id,
+            manifest.id,
+            format!("音色试听 {}", timestamp),
+            relative_path,
+            format!("design-{}", request.character_id),
+            timestamp,
+            timestamp
+        ],
+    )?;
+    Ok(GeneratedVoiceSample {
+        asset_id,
+        audio_path: destination.to_string_lossy().to_string(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalizeCharacterVoiceRequest {
+    character_id: String,
+    /// 缺省时自动使用该角色最近一次生成的试听样本
+    asset_id: Option<String>,
+}
+
+/// 把试听满意的样本固化为角色音色：走 voiceclone 模式，
+/// 该角色后续合成都引用同一份样本，音色确定性由样本保证。
+#[tauri::command]
+fn finalize_character_voice(
+    state: tauri::State<'_, AppState>,
+    request: FinalizeCharacterVoiceRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let (manifest, _) = storage::ensure_project_loaded(&root)?;
+    let (asset_id, relative_path, mime_type): (String, String, String) = match request.asset_id.as_deref() {
+        Some(asset_id) => {
+            let (relative_path, mime_type) = conn
+                .query_row(
+                    "SELECT relative_path, mime_type FROM voice_assets WHERE id = ?1 AND project_id = ?2",
+                    params![asset_id, manifest.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| err("音色样本不存在，请重新生成"))?;
+            (asset_id.to_string(), relative_path, mime_type)
+        }
+        None => conn
+            .query_row(
+                "SELECT id, relative_path, mime_type FROM voice_assets
+                 WHERE project_id = ?1 AND asset_type = 'voice_design_sample' AND source_file_name = ?2
+                 ORDER BY updated_at DESC LIMIT 1",
+                params![manifest.id, format!("design-{}", request.character_id)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| err("该角色还没有生成过声音样本，请先在声音工坊里生成"))?,
+    };
+    let sample_path = root.join(&relative_path);
+    if !sample_path.is_file() {
+        return Err(err("音色样本文件已丢失，请重新生成"));
+    }
+    let name: String = conn.query_row(
+        "SELECT canonical_name FROM characters WHERE id = ?1 AND project_id = ?2",
+        params![request.character_id, manifest.id],
+        |row| row.get(0),
+    )?;
+    // 该角色旧的声音档案解绑归档，避免同角色多套音色
+    conn.execute(
+        "UPDATE voice_profiles SET character_id = NULL, updated_at = ?1 WHERE character_id = ?2",
+        params![storage::now(), request.character_id],
+    )?;
+    let profile_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = storage::now();
+    conn.execute(
+        "INSERT INTO voice_profiles
+         (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id,
+          voice_asset_id, speed, pitch, style, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'adult', 'mimo', 'mimo-v2.5-tts-voiceclone', ?5, ?6, 1.0, 0.0, NULL, ?7, ?8)",
+        params![
+            profile_id,
+            manifest.id,
+            request.character_id,
+            format!("{name} 声音（已固化）"),
+            format!("clone:{asset_id}"),
+            asset_id,
+            timestamp,
+            timestamp
+        ],
+    )?;
+    // 未生成音频的分段跟随新音色
+    conn.execute(
+        "UPDATE segments SET voice_profile_id = NULL WHERE character_id = ?1 AND audio_status = 'missing'",
+        params![request.character_id],
+    )?;
+    let _ = (relative_path, mime_type);
+    storage::snapshot(&root)
 }
 
 #[tauri::command]
@@ -853,6 +1183,45 @@ fn upload_segment_audio(
         &request.segment_id,
         &PathBuf::from(request.source_path),
         request.ffmpeg_path.as_deref(),
+    )?;
+    storage::snapshot(&root)
+}
+
+#[tauri::command]
+fn save_segment_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: SaveSegmentRecordingRequest,
+) -> StudioResult<StudioSnapshot> {
+    use base64::Engine as _;
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(request.data_base64.as_bytes())
+        .map_err(|error| err(format!("录音数据解码失败：{error}")))?;
+    if data.is_empty() {
+        return Err(err("录音内容为空"));
+    }
+    let extension = match request.mime_type.split(';').next().unwrap_or("") {
+        "audio/webm" => "webm",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        other => return Err(err(format!("不支持的录音格式：{other}"))),
+    };
+    let ffmpeg_path = request.ffmpeg_path.or_else(|| {
+        let config_dir = app.path().app_config_dir().ok()?;
+        let value = settings::load(&config_dir).ok()?.audio.ffmpeg_path;
+        (!value.is_empty()).then_some(value)
+    });
+    audio::save_segment_recording(
+        &conn,
+        &root,
+        &request.segment_id,
+        &data,
+        extension,
+        ffmpeg_path.as_deref(),
     )?;
     storage::snapshot(&root)
 }
@@ -1059,7 +1428,7 @@ fn save_provider_api_key(provider: String, api_key: String) -> StudioResult<Prov
     if api_key.is_empty() {
         return Err(err("API Key 不能为空"));
     }
-    provider_keychain_entry(&provider)?.set_password(api_key)?;
+    write_provider_secret(&provider, api_key)?;
     Ok(ProviderSecretStatus {
         provider,
         exists: true,
@@ -1069,23 +1438,216 @@ fn save_provider_api_key(provider: String, api_key: String) -> StudioResult<Prov
 #[tauri::command]
 fn get_provider_api_key(provider: String) -> StudioResult<Option<String>> {
     let provider = normalize_provider_id(&provider)?;
-    match provider_keychain_entry(&provider)?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(error) => Err(error.into()),
+    Ok(read_provider_secret(&provider))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindCharacterVoiceRequest {
+    profile_id: String,
+    character_id: Option<String>,
+}
+
+#[tauri::command]
+fn bind_character_voice(
+    state: tauri::State<'_, AppState>,
+    request: BindCharacterVoiceRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let character_id = request.character_id.filter(|value| !value.trim().is_empty());
+    storage::bind_voice_profile(&conn, &request.profile_id, character_id.as_deref())?;
+    storage::snapshot(&root)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCharacterVoiceRequest {
+    character_id: String,
+    voice_id: String,
+    tts_provider: String,
+    model: Option<String>,
+}
+
+/// 角色直接绑定音色 ID：已绑定声音档案的更新其音色，否则创建一条档案。
+/// 音色一致性由"角色的属性"保证——同一角色的所有分段用同一音色。
+#[tauri::command]
+fn set_character_voice(
+    state: tauri::State<'_, AppState>,
+    request: SetCharacterVoiceRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let voice_id = request.voice_id.trim();
+    if voice_id.is_empty() {
+        return Err(err("音色 ID 不能为空"));
     }
+    let provider = normalize_provider_id(&request.tts_provider)?;
+    let project_id: String = conn.query_row(
+        "SELECT project_id FROM characters WHERE id = ?1",
+        params![request.character_id],
+        |row| row.get(0),
+    )?;
+    let name: String = conn.query_row(
+        "SELECT canonical_name FROM characters WHERE id = ?1",
+        params![request.character_id],
+        |row| row.get(0),
+    )?;
+    let updated = conn.execute(
+        "UPDATE voice_profiles SET voice_id = ?1, model = 'mimo-v2.5-tts', voice_asset_id = NULL, updated_at = ?2 WHERE character_id = ?3",
+        params![voice_id, storage::now(), request.character_id],
+    )?;
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO voice_profiles (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'adult', ?5, ?6, ?7, 1.0, 0.0, NULL, ?8, ?9)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                project_id,
+                request.character_id,
+                format!("{name} 声音"),
+                provider,
+                request.model,
+                voice_id,
+                storage::now(),
+                storage::now()
+            ],
+        )?;
+    }
+    let _ = name;
+    // 该角色未生成音频的分段跟随新音色
+    conn.execute(
+        "UPDATE segments SET voice_profile_id = NULL WHERE character_id = ?1 AND audio_status = 'missing'",
+        params![request.character_id],
+    )?;
+    storage::snapshot(&root)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetNarratorVoiceRequest {
+    voice_id: String,
+    tts_provider: String,
+    model: Option<String>,
+}
+
+/// 旁白音色：存储在 character_id 为空的那条声音档案上。
+#[tauri::command]
+fn set_narrator_voice(
+    state: tauri::State<'_, AppState>,
+    request: SetNarratorVoiceRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let voice_id = request.voice_id.trim();
+    if voice_id.is_empty() {
+        return Err(err("音色 ID 不能为空"));
+    }
+    let (manifest, _) = storage::ensure_project_loaded(&root)?;
+    let narrator_profile_id = tts::ensure_default_narrator_profile(&conn, &manifest.id)?;
+    conn.execute(
+        "UPDATE voice_profiles SET voice_id = ?1, tts_provider = ?2, model = ?3, updated_at = ?4 WHERE id = ?5",
+        params![
+            voice_id,
+            normalize_provider_id(&request.tts_provider)?,
+            request.model,
+            storage::now(),
+            narrator_profile_id
+        ],
+    )?;
+    storage::snapshot(&root)
 }
 
 #[tauri::command]
 fn delete_provider_api_key(provider: String) -> StudioResult<ProviderSecretStatus> {
     let provider = normalize_provider_id(&provider)?;
-    match provider_keychain_entry(&provider)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(ProviderSecretStatus {
-            provider,
-            exists: false,
-        }),
-        Err(error) => Err(error.into()),
+    delete_provider_secret(&provider)?;
+    Ok(ProviderSecretStatus {
+        provider,
+        exists: false,
+    })
+}
+
+/* ----------
+ * 供应商密钥存储：配置目录下的混淆文件（XOR + base64，防平凡扫描，非强加密）。
+ * 全部项目共用一套密钥；XOR 的 salt 是 salt 字段自身的原始字符串字节，
+ * 写入与读取必须使用同一口径。
+ * ---------- */
+
+const PROVIDER_KEYS_FILE: &str = "provider-keys.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ProviderKeyFile {
+    /// base64 随机盐；首写时生成
+    salt: String,
+    /// provider -> base64(xor(key, salt 原始字符串字节))
+    #[serde(flatten)]
+    keys: std::collections::HashMap<String, String>,
+}
+
+fn provider_keys_path() -> StudioResult<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| err("无法确定用户主目录"))?;
+    Ok(PathBuf::from(home)
+        .join("Library/Application Support/com.xiic.voice-studio")
+        .join(PROVIDER_KEYS_FILE))
+}
+
+fn load_provider_keys() -> ProviderKeyFile {
+    provider_keys_path()
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn store_provider_keys(file: &ProviderKeyFile) -> StudioResult<()> {
+    let path = provider_keys_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
+    fs::write(&path, serde_json::to_vec_pretty(file)?)?;
+    Ok(())
+}
+
+fn xor_with_salt(data: &[u8], salt: &[u8]) -> Vec<u8> {
+    data.iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ salt[index % salt.len()])
+        .collect()
+}
+
+fn read_provider_secret(provider: &str) -> Option<String> {
+    let file = load_provider_keys();
+    let salt = file.salt.clone().into_bytes();
+    if let Some(encoded) = file.keys.get(provider) {
+        if let Ok(decoded) = BASE64_ENGINE.decode(encoded) {
+            if let Ok(key) = String::from_utf8(xor_with_salt(&decoded, &salt)) {
+                if !key.trim().is_empty() {
+                    return Some(key);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn write_provider_secret(provider: &str, key: &str) -> StudioResult<()> {
+    let mut file = load_provider_keys();
+    if file.salt.is_empty() {
+        file.salt = BASE64_ENGINE.encode(Uuid::new_v4().as_bytes());
+    }
+    let encoded = BASE64_ENGINE.encode(xor_with_salt(key.as_bytes(), file.salt.as_bytes()));
+    file.keys.insert(provider.to_string(), encoded);
+    store_provider_keys(&file)?;
+    Ok(())
+}
+
+fn delete_provider_secret(provider: &str) -> StudioResult<()> {
+    let mut file = load_provider_keys();
+    if file.keys.remove(provider).is_some() {
+        store_provider_keys(&file)?;
+    }
+    Ok(())
 }
 
 fn current_root(state: &tauri::State<'_, AppState>) -> StudioResult<PathBuf> {
@@ -1145,11 +1707,7 @@ fn provider_settings_with_stored_key(
         .map(|key| !key.is_empty())
         .unwrap_or(false);
     if !has_key {
-        settings.api_key = match provider_keychain_entry(&provider)?.get_password() {
-            Ok(value) => Some(value),
-            Err(KeyringError::NoEntry) => None,
-            Err(error) => return Err(error.into()),
-        };
+        settings.api_key = read_provider_secret(&provider);
     }
     Ok(Some(settings))
 }
@@ -1167,11 +1725,7 @@ fn llm_settings_with_stored_key(
         .map(|key| !key.is_empty())
         .unwrap_or(false);
     if !has_key {
-        settings.api_key = match provider_keychain_entry(LLM_KEYCHAIN_ID)?.get_password() {
-            Ok(value) => Some(value),
-            Err(KeyringError::NoEntry) => None,
-            Err(error) => return Err(error.into()),
-        };
+        settings.api_key = read_provider_secret(LLM_KEYCHAIN_ID);
     }
     Ok(Some(settings))
 }
@@ -1182,10 +1736,6 @@ fn normalize_provider_id(provider: &str) -> StudioResult<String> {
         return Err(err("供应商不能为空"));
     }
     Ok(provider.to_ascii_lowercase())
-}
-
-fn provider_keychain_entry(provider: &str) -> StudioResult<Entry> {
-    Entry::new("xiic-voice-studio", provider).map_err(Into::into)
 }
 
 fn spawn_tts_batch(
@@ -1242,7 +1792,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_project,
             open_project,
+            get_last_project_root,
             import_source,
+            list_chapter_rules,
+            preview_chapter_split,
+            detect_chapter_rule,
             list_chapters,
             delete_chapter,
             mark_chapter,
@@ -1268,6 +1822,7 @@ pub fn run() {
             get_audio_output_directory,
             review_segment_audio,
             upload_segment_audio,
+            save_segment_recording,
             set_segment_audio_status,
             regenerate_segment,
             export_voice_script,
@@ -1287,7 +1842,13 @@ pub fn run() {
             list_voices,
             save_provider_api_key,
             get_provider_api_key,
-            delete_provider_api_key
+            delete_provider_api_key,
+            bind_character_voice,
+            generate_voice_description,
+            generate_character_voice_sample,
+            finalize_character_voice,
+            set_character_voice,
+            set_narrator_voice
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用运行失败");

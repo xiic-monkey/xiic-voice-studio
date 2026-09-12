@@ -46,7 +46,7 @@ export const text = {
   open: "打开",
   import: "导入",
   mark: "标注",
-  generate: "生成",
+  generate: "生成语音",
   activeTasks: "个任务",
   project: "项目",
   author: "作者",
@@ -61,8 +61,8 @@ export const text = {
   ttsApiKey: "TTS API Key",
   saveApiKey: "保存密钥",
   deleteApiKey: "删除密钥",
-  apiKeySaved: "密钥已保存到系统 Keychain",
-  noApiKeySaved: "密钥未保存",
+  apiKeySaved: "密钥已保存（混淆加密存储在应用配置目录）",
+  noApiKeySaved: "密钥未保存，填写后点「保存密钥」或右上角「保存设置」",
   ttsEndpoint: "TTS Base URL",
   ttsModel: "TTS 模型",
   ttsVoiceId: "默认音色 / VoiceDesign 描述",
@@ -96,6 +96,7 @@ export const text = {
   index: "#",
   type: "类型",
   speaker: "说话人",
+  character: "角色",
   content: "文本",
   status: "状态",
   tools: "操作",
@@ -106,6 +107,7 @@ export const text = {
   emptySegments: "导入并标注章节后，会在这里生成可编辑的制作分段。",
   characters: "角色",
   noAliases: "无别名",
+  noVoiceAssigned: "未配声音",
   assignVoice: "分配声音",
   mergeCharacters: "合并角色",
   sourceCharacter: "来源角色",
@@ -124,8 +126,30 @@ export const text = {
   noSegment: "未选择分段",
   reviewNote: "需要检查节奏或表演",
   narratorVoice: "旁白声音",
+  narratorVoiceLabel: "旁白",
   adultVoice: "成年声音",
   mimoVoice: "Mimo 声音",
+  // 拆章对话框
+  splitDialogTitle: "导入稿件 · 选择拆章方式",
+  splitHeuristic: "启发式自动（默认）",
+  splitHeuristicHint: "自动探测最常用的章节标题格式，无需手动配置",
+  splitPickRule: "选择内置规则",
+  splitCustom: "自定义正则",
+  splitCustomHint: "手动输入 Rust 正则，或从文本中一键解析",
+  splitRuleDescription: "规则说明",
+  splitAiParse: "AI 一键解析",
+  splitAiParseHint: "用自然语言描述章节格式，让大模型生成正则",
+  splitFormatHintLabel: "章节格式描述（可选）",
+  splitFormatHintPlaceholder: "例如：章节标题形如「卷一· 初入江湖」，或「Episode 12」",
+  splitPreview: "拆章预览",
+  splitMatchedLines: "正则命中的前几行",
+  splitNoMatch: "当前正则未命中任何章节标题行",
+  splitConfirmImport: "确认导入",
+  splitHeuristicSource: "启发式自动识别",
+  splitPatternSource: "指定正则",
+  splitSingleSource: "未识别到章节（整篇作为单章）",
+  splitNeedLlm: "未配置 LLM，AI 一键解析不可用。请在设置中填写 LLM 密钥。",
+  cancel: "取消",
 };
 
 export const segmentTypeLabels: Record<SegmentType, string> = {
@@ -220,7 +244,11 @@ export const defaultAppSettings: AppSettings = {
     stylePrompt: providerDefaults.mimo.stylePrompt,
   },
   audio: { ffmpegPath: "", episodeFormat: "m4b" },
+  workspace: { lastProjectRoot: null },
 };
+
+/** Mimo 预置音色 ID：绑定这些 ID（或克隆样本）音色稳定；描述式音色每次生成可能不同 */
+export const MIMO_PRESET_VOICES = ["Mia", "Chloe", "Milo", "Dean", "mimo_default"];
 
 export const desktopRuntimeMessage =
   "当前为浏览器预览模式。连接测试、密钥管理和本地文件操作需要在 Xiic Voice Studio 桌面应用中执行。";

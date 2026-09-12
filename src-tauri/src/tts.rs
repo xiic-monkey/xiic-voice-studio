@@ -660,7 +660,7 @@ pub fn preferred_voice_profile_for_character(
     Ok(profile_id)
 }
 
-fn ensure_default_narrator_profile(conn: &Connection, project_id: &str) -> StudioResult<String> {
+pub(crate) fn ensure_default_narrator_profile(conn: &Connection, project_id: &str) -> StudioResult<String> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM voice_profiles
@@ -927,7 +927,7 @@ fn load_tts_requests(
         let request = conn.query_row(
             "SELECT s.id, s.text, COALESCE(v.tts_provider, 'mock'), v.model,
                     COALESCE(v.voice_id, 'mock-female-narrator'), COALESCE(v.speed, 1.0),
-                    COALESCE(v.pitch, 0.0), v.style, a.relative_path, a.mime_type
+                    COALESCE(v.pitch, 0.0), v.style, s.emotion, a.relative_path, a.mime_type
              FROM segments s
              LEFT JOIN voice_profiles v ON s.voice_profile_id = v.id
              LEFT JOIN voice_assets a ON v.voice_asset_id = a.id
@@ -945,14 +945,28 @@ fn load_tts_requests(
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )?;
-        let voice_sample = match (request.8, request.9) {
+        let voice_sample = match (request.9, request.10) {
             (Some(relative_path), Some(mime_type)) => {
                 Some(load_voice_sample(project_root, &relative_path, &mime_type)?)
             }
             _ => None,
+        };
+        // 台词情绪并入 style：与角色表演提示拼接，供应商按自然语言理解
+        let parts: Vec<String> = [request.7.as_deref(), request.8.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .collect();
+        let style = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("，"))
         };
         requests.push(TtsRequest {
             segment_id: request.0,
@@ -962,7 +976,7 @@ fn load_tts_requests(
             voice_id: request.4,
             speed: request.5,
             pitch: request.6,
-            style: request.7,
+            style,
             voice_sample,
         });
     }

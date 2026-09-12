@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { Chapter, ProductionCheckReport, SettingsSection, VoiceCenterSection } from "./types";
 import { desktopRuntimeMessage } from "./constants";
@@ -22,6 +22,8 @@ import { ScriptSurface } from "./components/ScriptSurface";
 import { CharacterPanel, JobPanel, ReviewPanel, VoicePanel } from "./components/Inspector";
 import { SettingsView } from "./components/SettingsView";
 import { VoiceCenter } from "./components/VoiceCenter";
+import { ChapterSplitDialog } from "./components/ChapterSplitDialog";
+import { CharacterVoiceDialog } from "./components/CharacterVoiceDialog";
 import { AudioPlayer } from "./components/AudioPlayer";
 
 /**
@@ -78,6 +80,28 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("llm");
   const [voiceCenterOpen, setVoiceCenterOpen] = useState(false);
+  const [importDialogPath, setImportDialogPath] = useState<string | null>(null);
+  const [voiceDesignCharacter, setVoiceDesignCharacter] = useState<{ id: string; name: string } | null>(null);
+
+  // 启动时自动恢复上次打开的项目；只跑一次，失败静默。
+  const restoreRef = useRef(false);
+  useEffect(() => {
+    if (restoreRef.current || desktopRuntime === false) return;
+    restoreRef.current = true;
+    void actions.openLastProject();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function beginImport() {
+    const path = await actions.beginImport();
+    if (path) setImportDialogPath(path);
+  }
+
+  function confirmImport(pattern: string | null) {
+    const path = importDialogPath;
+    setImportDialogPath(null);
+    if (path) actions.importWithPattern(path, pattern);
+  }
 
   function leaveSettings() {
     if (settings.settingsDirty && !window.confirm("有未保存的设置更改，确定放弃并返回工作台吗？")) return;
@@ -98,6 +122,7 @@ function App() {
         onSectionChange={setSettingsSection}
         onLeave={leaveSettings}
         busy={busy}
+        notice={notice}
         snapshot={project.snapshot}
         settings={settings}
         projectCoverPath={actions.projectCoverPath}
@@ -123,7 +148,7 @@ function App() {
         canMark={Boolean(project.activeChapterId)}
         canGenerate={project.segments.length > 0}
         onOpenProject={actions.openProject}
-        onImportSource={actions.importSource}
+        onImportSource={beginImport}
         onMarkChapter={actions.markChapter}
         onGenerateAll={() => actions.generateTts(project.segments.map((segment) => segment.id))}
       />
@@ -174,11 +199,17 @@ function App() {
           <CharacterPanel
             snapshot={project.snapshot}
             characters={characters}
-            onAssignVoice={actions.assignVoice}
+            busy={busy}
+            onSetCharacterVoice={actions.setCharacterVoice}
+            onDesignVoice={(characterId: string, characterName: string) =>
+              setVoiceDesignCharacter({ id: characterId, name: characterName })
+            }
+            onFinalizeCharacterVoice={actions.finalizeCharacterVoice}
           />
           <VoicePanel
             snapshot={project.snapshot}
-            onAssignNarrator={() => actions.assignVoice(undefined)}
+            busy={busy}
+            onSetNarratorVoice={actions.setNarratorVoice}
             onOpenVoiceCenter={() => setVoiceCenterOpen(true)}
           />
           <ReviewPanel
@@ -224,6 +255,43 @@ function App() {
         onClose={() => setVoiceCenterOpen(false)}
         onSwitchSection={setVoiceCenterSection}
       />
+
+      {voiceDesignCharacter && (
+        <CharacterVoiceDialog
+          characterId={voiceDesignCharacter.id}
+          characterName={voiceDesignCharacter.name}
+          snapshot={project.snapshot}
+          ttsSettings={settings.tts.settings}
+          llm={{
+            baseUrl: settings.llm.baseUrl,
+            model: settings.llm.model,
+            apiKey: settings.llm.apiKey,
+          }}
+          busy={busy}
+          onNotice={setNotice}
+          onClose={() => setVoiceDesignCharacter(null)}
+          onFinalized={() => {
+            setVoiceDesignCharacter(null);
+            setNotice("角色音色已固化（克隆模式），重新生成后生效");
+          }}
+        />
+      )}
+
+      {importDialogPath && (
+        <ChapterSplitDialog
+          sourcePath={importDialogPath}
+          llm={{
+            baseUrl: settings.llm.baseUrl,
+            model: settings.llm.model,
+            apiKey: settings.llm.apiKey,
+            keySaved: settings.llm.keySaved,
+          }}
+          busy={busy}
+          onNotice={setNotice}
+          onClose={() => setImportDialogPath(null)}
+          onConfirm={confirmImport}
+        />
+      )}
     </main>
   );
 }

@@ -92,19 +92,90 @@ export function useStudioActions({
     await run(text.openingProject, () => invoke<StudioSnapshot>("open_project", { rootPath: root }), project.hydrateSnapshot);
   }
 
-  async function importSource() {
+  /** 启动时静默恢复上次打开的项目；路径失效则忽略。 */
+  async function openLastProject(): Promise<boolean> {
+    if (!desktopRuntime) return false;
+    const root = await invoke<string | null>("get_last_project_root").catch(() => null);
+    if (!root) return false;
+    const snapshot = await invoke<StudioSnapshot>("open_project", { rootPath: root }).catch(() => null);
+    if (!snapshot) return false;
+    project.hydrateSnapshot(snapshot);
+    return true;
+  }
+
+  async function setCharacterVoice(characterId: string, voiceId: string) {
+    const saved = await run(
+      "保存角色音色",
+      () =>
+        invoke<StudioSnapshot>("set_character_voice", {
+          request: {
+            characterId,
+            voiceId,
+            ttsProvider: settings.tts.provider,
+            model: settings.tts.model || undefined,
+          },
+        }),
+      project.hydrateSnapshot,
+    );
+    if (saved) setNotice("角色音色已更新，重新生成后生效");
+  }
+
+  /** 用该角色最近生成的试听样本固化音色（voiceclone） */
+  async function finalizeCharacterVoice(characterId: string) {
+    const saved = await run(
+      "固化角色音色",
+      () =>
+        invoke<StudioSnapshot>("finalize_character_voice", {
+          request: { characterId, assetId: undefined },
+        }),
+      project.hydrateSnapshot,
+    );
+    if (saved) setNotice("角色音色已固化（克隆模式），重新生成后生效");
+  }
+
+  async function setNarratorVoice(voiceId: string) {
+    const saved = await run(
+      "保存旁白音色",
+      () =>
+        invoke<StudioSnapshot>("set_narrator_voice", {
+          request: { voiceId, ttsProvider: settings.tts.provider, model: settings.tts.model || undefined },
+        }),
+      project.hydrateSnapshot,
+    );
+    if (saved) setNotice("旁白音色已更新，重新生成后生效");
+  }
+
+  async function saveSegmentRecording(segment: Segment, dataBase64: string, mimeType: string) {
+    await run(
+      "保存录音",
+      () =>
+        invoke<StudioSnapshot>("save_segment_recording", {
+          request: { segmentId: segment.id, dataBase64, mimeType },
+        }),
+      project.hydrateSnapshot,
+    );
+  }
+
+  async function beginImport(): Promise<string | null> {
     if (!desktopRuntime) {
       setNotice(desktopRuntimeMessage);
-      return;
+      return null;
     }
     const sourcePath = await open({
       multiple: false,
       filters: [{ name: text.sourceFilter, extensions: ["txt", "docx"] }],
     });
-    if (!sourcePath || Array.isArray(sourcePath)) return;
+    if (!sourcePath || Array.isArray(sourcePath)) return null;
+    return sourcePath;
+  }
+
+  async function importWithPattern(sourcePath: string, chapterPattern: string | null) {
     await run(
       text.importingSource,
-      () => invoke<StudioSnapshot>("import_source", { request: { sourcePath } }),
+      () =>
+        invoke<StudioSnapshot>("import_source", {
+          request: { sourcePath, chapterPattern },
+        }),
       project.hydrateSnapshot,
     );
   }
@@ -136,10 +207,14 @@ export function useStudioActions({
     const speaker = Object.prototype.hasOwnProperty.call(patch, "speaker")
       ? patch.speaker?.trim() || undefined
       : segment.speaker;
+    const characterId = Object.prototype.hasOwnProperty.call(patch, "characterId")
+      ? patch.characterId ?? ""
+      : (segment.characterId ?? "");
     const submittedDraft: SegmentDraft = {
       text: patch.text ?? segment.text,
       segmentType: patch.segmentType ?? segment.segmentType,
       speaker: speaker ?? "",
+      characterId,
     };
     const saved = await run(
       text.savingSegment,
@@ -150,6 +225,7 @@ export function useStudioActions({
             text: patch.text ?? segment.text,
             segmentType: patch.segmentType ?? segment.segmentType,
             speaker,
+            characterId: characterId || undefined,
             emotion: patch.emotion ?? segment.emotion,
             soundCue: patch.soundCue ?? segment.soundCue,
             anchor: patch.anchor ?? segment.anchor,
@@ -163,7 +239,12 @@ export function useStudioActions({
   async function saveSegmentDraft(segment: Segment) {
     const draft = editor.drafts[segment.id];
     if (!draft) return;
-    await saveSegment(segment, { text: draft.text, segmentType: draft.segmentType, speaker: draft.speaker });
+    await saveSegment(segment, {
+      text: draft.text,
+      segmentType: draft.segmentType,
+      speaker: draft.speaker,
+      characterId: draft.characterId ?? "",
+    });
   }
 
   async function deleteSegment(segment: Segment) {
@@ -394,7 +475,13 @@ export function useStudioActions({
     setAuthor,
     createProject,
     openProject,
-    importSource,
+    openLastProject,
+    saveSegmentRecording,
+    setCharacterVoice,
+    setNarratorVoice,
+    finalizeCharacterVoice,
+    beginImport,
+    importWithPattern,
     deleteChapter,
     markChapter,
     saveSegment,

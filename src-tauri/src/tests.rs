@@ -1438,6 +1438,49 @@ mod tests {
     }
 
     #[test]
+    fn chapter_split_heuristics_cover_common_formats() {
+        let formats: Vec<(&str, &str, usize)> = vec![
+            ("第一章 陨落的天才\n正文。\n第二章 斗气大陆\n正文。\n第三章 客人\n正文。", "di", 3),
+            ("第1章 起程\n正文。\n第2章 相遇\n正文。\n第3章 离开\n正文。", "di", 3),
+            ("1. 离开新手村\n正文。\n2. 相遇\n正文。\n3. 战斗\n正文。", "numbered", 3),
+            ("1\n正文。\n2\n正文。\n3\n正文。", "number-line", 3),
+            ("Chapter 1 The Beginning\n正文。\nChapter 2 The Journey\n正文。\nChapter 3 The End\n正文。", "chapter-en", 3),
+        ];
+        for (text, expected_id, expected_count) in formats {
+            let pattern = importer::detect_chapter_pattern(text)
+                .unwrap_or_else(|| panic!("规则 {expected_id} 应能命中"));
+            let matched = importer::SPLIT_RULES
+                .iter()
+                .find(|rule| rule.pattern == pattern.as_str())
+                .map(|rule| rule.id);
+            assert_eq!(
+                matched, Some(expected_id),
+                "文本应命中规则 {expected_id}，实际命中 {matched:?}"
+            );
+            let preview = importer::preview_split(text, Some(&pattern));
+            assert_eq!(preview.chapter_count, expected_count);
+        }
+    }
+
+    #[test]
+    fn implausible_patterns_are_rejected() {
+        // 只有三个非空行、全部命中：命中数不少于 3 但占满全部正文，不合理，应拒绝
+        let text = "第一段内容较多一些。\n第二段内容较多一些。\n第三段内容较多一些。";
+        assert!(importer::detect_chapter_pattern(text).is_none());
+    }
+
+    #[test]
+    fn custom_pattern_overrides_heuristics() {
+        let text = "卷一 起程\n正文。\n卷二 相遇\n正文。\n卷三 战斗\n正文。";
+        // 内置规则命不中（"卷" 必须跟在 "第" 后），自定义正则可以
+        assert!(importer::detect_chapter_pattern(text).is_none());
+        let pattern = importer::compile_split_pattern(r"^卷[一二三]").unwrap();
+        let preview = importer::preview_split(text, Some(&pattern));
+        assert_eq!(preview.chapter_count, 3);
+        assert_eq!(preview.sample_titles[0], "卷一 起程");
+    }
+
+    #[test]
     fn marking_ignores_generic_speakers_and_narration_speaker() {
         let root = std::env::temp_dir().join(format!("xiic-test-{}", Uuid::new_v4()));
         let summary = storage::create_project(&root, "泛称过滤测试", None).unwrap();

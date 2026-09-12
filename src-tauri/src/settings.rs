@@ -16,6 +16,15 @@ pub struct AppSettings {
     pub tts: TtsAppSettings,
     #[serde(default)]
     pub audio: AudioAppSettings,
+    #[serde(default)]
+    pub workspace: WorkspaceAppSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAppSettings {
+    #[serde(default)]
+    pub last_project_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,6 +69,7 @@ impl Default for AppSettings {
             llm: LlmAppSettings::default(),
             tts: TtsAppSettings::default(),
             audio: AudioAppSettings::default(),
+            workspace: WorkspaceAppSettings::default(),
         }
     }
 }

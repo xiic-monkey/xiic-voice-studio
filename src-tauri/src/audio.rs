@@ -511,7 +511,7 @@ pub fn collect_episode_audio_selection_for_chapters(
     if audio_paths.len() != segments.len() {
         return Err(err("整集导出失败：仍有分段缺少审听通过的音频"));
     }
-    if let Some(_) = current_chapter_id {
+    if current_chapter_id.is_some() {
         chapter_markers.push(EpisodeChapterMarker {
             title: current_chapter_title,
             start_ms: current_chapter_start,
@@ -543,6 +543,8 @@ pub async fn export_episode_from_paths(
     .await
 }
 
+/// 导出整集：音频列表 + 章节标记 + 元数据 + 封面，一次性传参，参数多但都是导出所需的原始输入。
+#[allow(clippy::too_many_arguments)]
 pub async fn export_episode_from_selection(
     root: &Path,
     audio_paths: Vec<PathBuf>,
@@ -813,7 +815,7 @@ fn export_production_manifest(
         "production-manifest.json".to_string(),
     ];
     if segmented_dir.exists() {
-        let mut segmented = WalkDir::new(&segmented_dir)
+        let mut segmented = WalkDir::new(segmented_dir)
             .min_depth(1)
             .max_depth(1)
             .into_iter()
@@ -972,6 +974,59 @@ pub fn upload_segment_audio(
     conn.execute(
         "INSERT INTO segment_audio (id, segment_id, relative_path, duration_ms, loudness_lufs, version, source, status, created_at)
          VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'manual_upload', 'uploaded', ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            segment_id,
+            relative_path,
+            duration_ms,
+            version,
+            now()
+        ],
+    )?;
+    conn.execute(
+        "UPDATE segments SET audio_status = 'uploaded', review_status = 'unreviewed', updated_at = ?1 WHERE id = ?2",
+        params![now(), segment_id],
+    )?;
+    Ok(())
+}
+
+/// 保存应用内录制的分段音频。与人工上传同一条版本化链路，
+/// webm 等浏览器封装格式依赖 FFmpeg 探测时长和后续导出转码。
+pub fn save_segment_recording(
+    conn: &Connection,
+    root: &Path,
+    segment_id: &str,
+    data: &[u8],
+    extension: &str,
+    ffmpeg_path: Option<&str>,
+) -> StudioResult<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM segments WHERE id = ?1",
+        params![segment_id],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Err(err("分段不存在，无法保存录音"));
+    }
+    if !["wav", "mp3", "m4a", "webm", "ogg"].contains(&extension) {
+        return Err(err(format!("不支持的录音格式：{extension}")));
+    }
+    let version = next_audio_version(conn, segment_id)?;
+    let file_name = format!("{segment_id}_recording_v{version}.{extension}");
+    let project_id: String = conn.query_row(
+        "SELECT c.project_id
+         FROM segments s
+         JOIN chapters c ON c.id = s.chapter_id
+         WHERE s.id = ?1",
+        params![segment_id],
+        |row| row.get(0),
+    )?;
+    let (relative_path, output_path) = new_audio_asset(root, &project_id, &file_name)?;
+    fs::write(&output_path, data)?;
+    let duration_ms = detect_audio_duration_ms(&output_path, ffmpeg_path).ok();
+    conn.execute(
+        "INSERT INTO segment_audio (id, segment_id, relative_path, duration_ms, loudness_lufs, version, source, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'recording', 'uploaded', ?6)",
         params![
             uuid::Uuid::new_v4().to_string(),
             segment_id,

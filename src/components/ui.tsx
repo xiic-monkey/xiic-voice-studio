@@ -7,12 +7,14 @@ export function Panel({
   title,
   icon,
   count,
+  action,
   className,
   children,
 }: {
   title?: ReactNode;
   icon?: ReactNode;
   count?: ReactNode;
+  action?: ReactNode;
   className?: string;
   children: ReactNode;
 }) {
@@ -23,6 +25,7 @@ export function Panel({
           {icon}
           <span>{title}</span>
           {count !== undefined && <span className="count">{count}</span>}
+          {action !== undefined && <span className="panel-action">{action}</span>}
         </div>
       )}
       {children}

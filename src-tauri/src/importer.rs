@@ -3,6 +3,7 @@ use crate::error::{err, StudioResult};
 use crate::storage::now;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use regex::Regex;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::Read;
@@ -41,12 +42,166 @@ pub fn read_source(path: &Path) -> StudioResult<ImportedSource> {
     })
 }
 
+/// 内置拆章规则。顺序即启发式择优顺序：越靠前越特异，命中即停。
+pub struct SplitRule {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub pattern: &'static str,
+    pub description: &'static str,
+}
+
+pub const SPLIT_RULES: &[SplitRule] = &[
+    SplitRule {
+        id: "di",
+        label: "第X章 / 第X回 / 第X卷",
+        pattern: r"^第[〇零0-9０-９一二三四五六七八九十百千两]+\s*[章节回卷集部篇]",
+        description: "匹配「第一章 陨落的天才」「第123章」「第三回」等中文序号标题",
+    },
+    SplitRule {
+        id: "chapter-en",
+        label: "Chapter N",
+        pattern: r"^Chapter\s+[0-9０-９]+",
+        description: "匹配英文编号标题，如「Chapter 12 A New Dawn」",
+    },
+    SplitRule {
+        id: "bracket",
+        label: "【第X章 …】",
+        pattern: r"^【[^】]{0,40}[章节回卷集][^】]{0,40}】",
+        description: "匹配整行括号包裹的标题，如「【第一章 起程】」",
+    },
+    SplitRule {
+        id: "numbered",
+        label: "1. 标题 / 1、标题",
+        pattern: r"^[0-9０-９]{1,4}([.、,:：．]|\s)\s*\S+",
+        description: "匹配阿拉伯数字编号标题，如「12. 离开新手村」",
+    },
+    SplitRule {
+        id: "number-line",
+        label: "单独数字行",
+        pattern: r"^[0-9０-９]{1,4}$",
+        description: "匹配整行只有一个数字的标题行",
+    },
+];
+
+pub fn compile_split_pattern(pattern: &str) -> StudioResult<Regex> {
+    Regex::new(pattern).map_err(|error| err(format!("正则无效：{error}")))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitRuleDto {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub pattern: &'static str,
+    pub description: &'static str,
+}
+
+pub fn split_rule_dtos() -> Vec<SplitRuleDto> {
+    SPLIT_RULES
+        .iter()
+        .map(|rule| SplitRuleDto {
+            id: rule.id,
+            label: rule.label,
+            pattern: rule.pattern,
+            description: rule.description,
+        })
+        .collect()
+}
+
+/// 启发式合理性：至少 3 个命中、命中行都是短行（≤50 字）、
+/// 且标题行不超过非空行数的 50%（标题不能是正文主体），
+/// 避免把正文里的引用或编号列表当成章节。
+fn is_plausible_split_pattern(text: &str, regex: &Regex) -> bool {
+    let non_empty = text.lines().filter(|line| !line.trim().is_empty()).count();
+    let mut matches = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !regex.is_match(trimmed) {
+            continue;
+        }
+        if trimmed.chars().count() > 50 {
+            return false;
+        }
+        matches += 1;
+    }
+    matches >= 3 && non_empty > 0 && matches * 2 <= non_empty
+}
+
+/// 内置规则按顺序择优，全部不命中则返回 None（整篇作为单章）。
+pub fn detect_chapter_pattern(text: &str) -> Option<Regex> {
+    for rule in SPLIT_RULES {
+        let Ok(regex) = Regex::new(rule.pattern) else {
+            continue;
+        };
+        if is_plausible_split_pattern(text, &regex) {
+            return Some(regex);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitPreview {
+    pub chapter_count: usize,
+    pub sample_titles: Vec<String>,
+    /// 实际命中的章节标题行（最多 12 行），供导入前预览正则匹配效果。
+    pub matched_lines: Vec<String>,
+    /// "pattern"：使用给定正则；"heuristic"：启发式择优；"single"：未能拆分
+    pub rule_source: String,
+}
+
+pub fn preview_split(text: &str, pattern: Option<&Regex>) -> SplitPreview {
+    // 解析实际生效的正则：传入 None 时走启发式检测。
+    let effective = pattern.cloned().or_else(|| detect_chapter_pattern(text));
+    let matched_lines: Vec<String> = match &effective {
+        Some(regex) => text
+            .lines()
+            .map(clean_title)
+            .filter(|line| !line.is_empty() && regex.is_match(line))
+            .take(12)
+            .collect(),
+        None => Vec::new(),
+    };
+    let chapters = split_chapters("导入稿件", text, effective.as_ref());
+    let rule_source = if pattern.is_some() {
+        "pattern"
+    } else if chapters.len() > 1 {
+        "heuristic"
+    } else {
+        "single"
+    };
+    SplitPreview {
+        chapter_count: chapters.len(),
+        sample_titles: chapters
+            .iter()
+            .take(8)
+            .map(|(title, _)| title.clone())
+            .collect(),
+        matched_lines,
+        rule_source: rule_source.to_string(),
+    }
+}
+
+/// 便捷入口：启发式自动识别拆章规则。仅测试使用，正式导入走
+/// `import_source_with_pattern`（支持用户选择/自定义正则）。
+#[allow(dead_code)]
 pub fn import_source(
     conn: &Connection,
     project_id: &str,
     source: &ImportedSource,
 ) -> StudioResult<Vec<String>> {
-    let chapters = split_chapters(&source.title, &source.text);
+    let pattern = detect_chapter_pattern(&source.text);
+    import_source_with_pattern(conn, project_id, source, pattern.as_ref())
+}
+
+pub fn import_source_with_pattern(
+    conn: &Connection,
+    project_id: &str,
+    source: &ImportedSource,
+    pattern: Option<&Regex>,
+) -> StudioResult<Vec<String>> {
+    let chapters = split_chapters(&source.title, &source.text, pattern);
     let mut chapter_ids = Vec::new();
     let existing_count: i64 = conn.query_row("SELECT COUNT(*) FROM chapters", [], |r| r.get(0))?;
     for (index, (title, text)) in chapters.into_iter().enumerate() {
@@ -147,20 +302,35 @@ fn normalize_text(text: &str) -> String {
         .join("\n")
 }
 
-fn split_chapters(default_title: &str, text: &str) -> Vec<(String, String)> {
+/// 章节标题清洗：折叠所有空白（含换行/制表/零宽空格）为单个空格并去首尾，
+/// 保证标题永远是单行、无异常换行。源文件里的换行式标题或多余空格都在此兜底。
+fn clean_title(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn split_chapters(
+    default_title: &str,
+    text: &str,
+    pattern: Option<&Regex>,
+) -> Vec<(String, String)> {
     let mut chapters = Vec::new();
     let mut current_title = default_title.to_string();
     let mut current = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        let is_heading = trimmed.starts_with('第')
-            && (trimmed.contains('章') || trimmed.contains('回') || trimmed.contains('集'));
+        let is_heading = match pattern {
+            Some(regex) => regex.is_match(trimmed),
+            None => {
+                trimmed.starts_with('第')
+                    && (trimmed.contains('章') || trimmed.contains('回') || trimmed.contains('集'))
+            }
+        };
         if is_heading && !current.is_empty() {
             chapters.push((current_title, current.join("\n")));
             current.clear();
-            current_title = trimmed.to_string();
+            current_title = clean_title(trimmed);
         } else if is_heading {
-            current_title = trimmed.to_string();
+            current_title = clean_title(trimmed);
         } else if !trimmed.is_empty() {
             current.push(trimmed.to_string());
         }
@@ -200,6 +370,11 @@ fn infer_segment(line: &str) -> (SegmentType, Option<String>, String) {
     let clean = line.trim().to_string();
     if clean.starts_with('【') && clean.ends_with('】') {
         return (SegmentType::SoundCue, None, clean);
+    }
+    // 以开引号开头的行视为台词（announcement/对话），不要按“speaker：text”拆分，
+    // 否则 "斗之气：七段！" 会被拆成 speaker="“斗之气"、text="七段！"。
+    if clean.starts_with(['“', '‘', '「', '『']) {
+        return (SegmentType::Dialogue, None, clean);
     }
     let separator_index = clean.find('：').or_else(|| clean.find(':'));
     if let Some(separator_index) = separator_index {

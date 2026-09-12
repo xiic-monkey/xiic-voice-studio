@@ -16,7 +16,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import type { Segment, SegmentType, StudioSnapshot } from "../types";
+import type { Segment, SegmentType, StudioSnapshot, Character } from "../types";
 import { segmentTypeLabels, segmentTypes, text } from "../constants";
 import type { SegmentEditorController } from "../hooks/useSegmentEditor";
 import { SegmentStatus } from "./ui";
@@ -77,8 +77,8 @@ export function ScriptSurface({
   return (
     <section className="script-surface">
       <div className="surface-header">
-        <div>
-          <h1>{activeChapterTitle ?? text.scriptWorkspace}</h1>
+        <div className="surface-title">
+          <h1 title={activeChapterTitle ?? undefined}>{activeChapterTitle ?? text.scriptWorkspace}</h1>
           <span>
             {snapshot
               ? `${snapshot.project.segmentCount}${text.segmentUnit} · ${snapshot.project.characterCount}${text.characterUnit}`
@@ -112,6 +112,7 @@ export function ScriptSurface({
       <SegmentTable
         segments={segments}
         selectedSegmentId={selectedSegmentId}
+        characters={snapshot?.characters ?? []}
         onSelectSegment={onSelectSegment}
         editor={editor}
         onSaveSegmentDraft={onSaveSegmentDraft}
@@ -330,6 +331,7 @@ function ExportMenu({ chapters, exportScope, disabled, onExport, onExportEpisode
 type RowProps = {
   segments: Segment[];
   selectedSegmentId: string;
+  characters: Character[];
   onSelectSegment: (id: string) => void;
   editor: SegmentEditorController;
   onSaveSegmentDraft: (segment: Segment) => void;
@@ -339,10 +341,21 @@ type RowProps = {
   onRegenerate: (segment: Segment) => void;
 };
 
+/** 说话人色点：优先按角色归属取角色色，再按说话人名匹配，无归属用中性色 */
+function speakerDotColor(segment: Segment, characters: Character[]): string | null {
+  return (
+    characters.find((character) => character.id === segment.characterId)?.defaultColor ??
+    (segment.speaker
+      ? characters.find((character) => character.canonicalName === segment.speaker)?.defaultColor ?? null
+      : null)
+  );
+}
+
 /** 两行式分段表：上排窄控件、下排全文，1080 最小窗口不再溢出。 */
 function SegmentTable({
   segments,
   selectedSegmentId,
+  characters,
   onSelectSegment,
   editor,
   onSaveSegmentDraft,
@@ -356,10 +369,9 @@ function SegmentTable({
       <div className="segment-row segment-head">
         <span className="segment-index">{text.index}</span>
         <span className="segment-type">{text.type}</span>
-        <span className="segment-speaker">{text.speaker}</span>
+        <span className="segment-char">{text.character}</span>
         <span className="segment-status">{text.status}</span>
         <span className="segment-actions">{text.tools}</span>
-        <span className="segment-text">{text.content}</span>
       </div>
       {segments.map((segment) => {
         const draft = editor.draftFor(segment);
@@ -379,13 +391,26 @@ function SegmentTable({
                 </option>
               ))}
             </select>
-            <input
-              className="segment-speaker"
-              value={draft.speaker}
-              onChange={(event) => editor.update(segment, { speaker: event.target.value })}
-              onBlur={() => onSaveSegmentDraft(segment)}
-              placeholder={text.narrator}
-            />
+            <div className="segment-char-box">
+              <span
+                className="speaker-dot"
+                style={{ background: speakerDotColor(segment, characters) ?? "var(--border-strong)" }}
+              />
+              <select
+                className="segment-char"
+                value={draft.characterId ?? ""}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => editor.update(segment, { characterId: event.target.value })}
+                onBlur={() => onSaveSegmentDraft(segment)}
+              >
+              <option value="">{text.narrator}</option>
+              {characters.map((character) => (
+                <option value={character.id} key={character.id}>
+                  {character.canonicalName}
+                </option>
+              ))}
+              </select>
+            </div>
             <span className="segment-status">
               <SegmentStatus audioStatus={segment.audioStatus} reviewStatus={segment.reviewStatus} />
             </span>
@@ -406,12 +431,22 @@ function SegmentTable({
                 <Trash2 size={15} />
               </button>
             </div>
-            <textarea
-              className="segment-text"
-              value={draft.text}
-              onChange={(event) => editor.update(segment, { text: event.target.value })}
-              onBlur={() => onSaveSegmentDraft(segment)}
-            />
+            <div className="segment-text-box">
+              <textarea
+                className="segment-text"
+                value={draft.text}
+                onChange={(event) => editor.update(segment, { text: event.target.value })}
+                onBlur={() => onSaveSegmentDraft(segment)}
+              />
+              <input
+                className="segment-emotion"
+                value={draft.emotion ?? ""}
+                onChange={(event) => editor.update(segment, { emotion: event.target.value })}
+                onBlur={() => onSaveSegmentDraft(segment)}
+                placeholder="情绪：如 愤怒、温柔、平静（标注时可自动生成）"
+                onClick={(event) => event.stopPropagation()}
+              />
+            </div>
           </div>
         );
       })}
