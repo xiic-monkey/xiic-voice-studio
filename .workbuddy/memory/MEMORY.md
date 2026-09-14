@@ -30,6 +30,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test  --manifest-path src-tauri/Cargo.toml
 ```
 无 Apple Developer 签名时产物为 ad hoc 未公证包，仅供本机运行。
+- Git 提交身份（2026-09-15 配置，**仅本仓库 local**）：`xiic-monkey <24518439+xiic-monkey@users.noreply.github.com>`（GitHub noreply 邮箱）。此前仓库级与全局均未配置身份，直接 `git commit` 会失败。
 
 ## 本地预览启动（实测坑）
 - 直接 `pnpm tauri dev` 在后台任务里跑，进程组会被回收（约 1 分钟后整体退出，窗口起不来）。
