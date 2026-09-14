@@ -30,3 +30,22 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test  --manifest-path src-tauri/Cargo.toml
 ```
 无 Apple Developer 签名时产物为 ad hoc 未公证包，仅供本机运行。
+
+## 本地预览启动（实测坑）
+- 直接 `pnpm tauri dev` 在后台任务里跑，进程组会被回收（约 1 分钟后整体退出，窗口起不来）。
+- 稳定做法：分开常驻——先 `pnpm dev`（Vite，前端在 http://localhost:1420，HMR 实时），再直接拉起已编译二进制 `./src-tauri/target/debug/xiic-voice-studio`（窗口落在用户 GUI 会话）。
+- 前端改动走 Vite HMR 自动热更；Rust 侧改动需重新 `cargo build` 并重启该二进制。
+- macOS 启动时会打一行 `error messaging the mach port for IMKCFRunLoopWakeUpReliable`，是输入法相关无害告警，不致命。
+
+## 发布包覆盖本地安装（xiic-voice-studio）
+- ⚠️ 当前状态（2026-09-12 实测）：`/Applications/xiic-voice-studio.app` **不存在**，此前记录的安装已失效/被清理；`open` 它会报文件不存在。日常预览请走上面的「Vite 常驻 + 直接拉 debug 二进制」分离方案。需要安装版时再跑下面流程重新生成。
+- 构建：`pnpm tauri build`（会自动跑 `pnpm build` 产 `dist`，再嵌入 Rust release 二进制）。
+- 产物：`src-tauri/target/release/bundle/macos/xiic-voice-studio.app`。
+- 覆盖安装到启动台：
+  ```bash
+  rm -rf "/Applications/xiic-voice-studio.app"
+  ditto "src-tauri/target/release/bundle/macos/xiic-voice-studio.app" "/Applications/xiic-voice-studio.app"
+  xattr -dr com.apple.quarantine "/Applications/xiic-voice-studio.app"
+  open "/Applications/xiic-voice-studio.app"
+  ```
+- 注意：Launch Services 可能缓存旧的 debug bundle（`src-tauri/target/debug/bundle/macos/xiic-voice-studio.app`），若 `open -a xiic-voice-studio` 拉起的是旧路径，应显式用 `/Applications/xiic-voice-studio.app` 的绝对路径打开。
