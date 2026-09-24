@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { StudioSnapshot, VoiceAsset, VoiceProfile } from "../types";
 import { ageStageLabels } from "../constants";
 import type { VoiceProfilesController } from "../hooks/useVoiceProfiles";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { AudioPlayer } from "./AudioPlayer";
 
 type Props = {
@@ -16,6 +17,7 @@ type Props = {
 };
 
 export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, onSwitchSection }: Props) {
+  useEscapeKey(open, onClose);
   if (!open) return null;
   const profiles = snapshot?.voiceProfiles ?? [];
   const assets = snapshot?.voiceAssets ?? [];

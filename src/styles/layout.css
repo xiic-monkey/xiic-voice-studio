@@ -38,6 +38,7 @@
 }
 
 .brand strong {
+  display: block;
   font-size: var(--fs-md);
   font-weight: var(--fw-semibold);
   line-height: var(--lh-tight);
@@ -45,6 +46,7 @@
 
 .brand span {
   color: var(--text-secondary);
+  display: block;
   font-size: var(--fs-xs);
   margin-top: 2px;
   max-width: 340px;
@@ -437,14 +439,6 @@
   gap: var(--sp-3);
   justify-content: space-between;
   padding: var(--sp-2) var(--sp-3);
-}
-
-.export-scope-summary {
-  color: var(--text-tertiary);
-  font-size: var(--fs-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 button.compact {

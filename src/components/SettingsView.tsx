@@ -95,7 +95,7 @@ export function SettingsView({
           </div>
         </header>
         <div className="settings-content">
-          {notice && (
+          {notice && notice !== text.ready && (
             <div className="runtime-notice" role="alert">
               <ShieldCheck size={17} />
               <div>

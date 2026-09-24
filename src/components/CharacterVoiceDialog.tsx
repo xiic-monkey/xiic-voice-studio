@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { AudioLines, Loader2, Sparkles, X } from "lucide-react";
 import type { Segment, StudioSnapshot } from "../types";
 import { errorMessage, invoke } from "../utils";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { AudioPlayer } from "./AudioPlayer";
 
 type Props = {
@@ -39,6 +40,11 @@ export function CharacterVoiceDialog({
   const [finalizing, setFinalizing] = useState(false);
   const [assetId, setAssetId] = useState("");
   const [audioPath, setAudioPath] = useState("");
+
+  // 与关闭按钮保持一致：任务进行中不允许误触 Esc 关闭
+  useEscapeKey(true, () => {
+    if (!busy) onClose();
+  });
 
   const defaultSample = useMemo(() => {
     const dialogue = (snapshot?.segments ?? []).find(

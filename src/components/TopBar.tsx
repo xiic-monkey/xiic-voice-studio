@@ -55,7 +55,7 @@ export function TopBar({
         </button>
       </div>
       <div className="job-strip">
-        {busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
+        {busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 className="idle" size={16} />}
         <span>{activeJobCount}{text.activeTasks}</span>
       </div>
     </header>

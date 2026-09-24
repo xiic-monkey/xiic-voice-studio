@@ -19,6 +19,7 @@ import {
 import type { Segment, SegmentType, StudioSnapshot, Character } from "../types";
 import { segmentTypeLabels, segmentTypes, text } from "../constants";
 import type { SegmentEditorController } from "../hooks/useSegmentEditor";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { SegmentStatus } from "./ui";
 import { VirtualList } from "./VirtualList";
 
@@ -144,6 +145,9 @@ function ExportMenu({ chapters, exportScope, disabled, onExport, onExportEpisode
   const [search, setSearch] = useState("");
   const lastCheckedIndexRef = useRef<number | null>(null);
 
+  // Esc 逐层收起：先关章节选择弹层，再关导出菜单
+  useEscapeKey(menuOpen, () => (pickerOpen ? closePicker() : closeMenu()));
+
   const filteredChapters = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return chapters;
@@ -247,7 +251,9 @@ function ExportMenu({ chapters, exportScope, disabled, onExport, onExportEpisode
                       <input
                         type="checkbox"
                         checked={isSelected(chapter)}
-                        onClick={(event) => handleCheck(chapter, index, event.shiftKey)}
+                        onChange={(event) =>
+                          handleCheck(chapter, index, event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey)
+                        }
                       />
                       <span>{chapter.title}</span>
                     </label>

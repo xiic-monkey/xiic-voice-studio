@@ -140,7 +140,9 @@
   font-size: var(--fs-2xs);
 }
 
-.chapter-item:hover .chapter-meta {
+/* 悬停或键盘聚焦时状态让位给操作按钮 */
+.chapter-item:hover .chapter-meta,
+.chapter-item:focus-within .chapter-meta {
   display: none;
 }
 
@@ -149,7 +151,8 @@
   gap: 0;
 }
 
-.chapter-item:hover .chapter-item-actions {
+.chapter-item:hover .chapter-item-actions,
+.chapter-item:focus-within .chapter-item-actions {
   display: flex;
 }
 
@@ -606,17 +609,9 @@
   font-size: var(--fs-2xs);
 }
 
-.voice-card > select,
 .job-actions {
   grid-column: 2;
   grid-row: 1 / span 2;
-}
-
-.voice-card > select {
-  font-size: var(--fs-2xs);
-  min-height: var(--control-h-sm);
-  min-width: 84px;
-  width: auto;
 }
 
 .job-actions {
@@ -635,15 +630,6 @@
 .character-card-actions {
   display: flex;
   gap: var(--sp-1);
-}
-
-.character-voice,
-.voice-owner {
-  display: block;
-  color: var(--accent-text);
-  font-size: var(--fs-2xs);
-  line-height: var(--lh-tight);
-  margin-top: var(--sp-1);
 }
 
 /* ---------- 角色编辑 ---------- */

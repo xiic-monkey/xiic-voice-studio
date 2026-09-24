@@ -111,7 +111,6 @@
   --control-h-lg: 40px;
 
   /* ---- 焦点环 ---- */
-  --focus-ring: 0 0 0 3px rgba(39, 110, 241, 0.28);
   --focus-ring-soft: 0 0 0 3px rgba(39, 110, 241, 0.12);
 
   /* ---- 布局尺度 ---- */
@@ -119,5 +118,4 @@
   --playerbar-h: 76px;
   --sidebar-w: 280px;
   --inspector-w: 312px;
-  --row-min-h: 56px;
 }

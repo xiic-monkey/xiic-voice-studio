@@ -18,6 +18,7 @@ import { MIMO_PRESET_VOICES, reviewIssueLabels, text } from "../constants";
 import { displayJobType, displayStatus } from "../utils";
 import type { CharactersController } from "../hooks/useCharacters";
 import type { ReviewIssueType } from "../types";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { EmptyState, Panel } from "./ui";
 
 /* ---------- 角色面板 ---------- */
@@ -61,6 +62,7 @@ function CharacterVoiceSelect({
       onClick={(event) => event.stopPropagation()}
       onChange={(event) => onSave(characterId, event.target.value)}
     >
+      {voiceId === "" && <option value="">未绑定音色</option>}
       {!isPreset && voiceId !== "" && <option value={voiceId}>当前描述（音色不稳定）</option>}
       {MIMO_PRESET_VOICES.filter((preset) => preset !== "mimo_default").map((preset) => (
         <option key={preset} value={preset}>
@@ -73,6 +75,7 @@ function CharacterVoiceSelect({
 
 export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice, onDesignVoice, onFinalizeCharacterVoice }: CharacterPanelProps) {
   const [mergeOpen, setMergeOpen] = useState(false);
+  useEscapeKey(mergeOpen, () => setMergeOpen(false));
   const list = snapshot?.characters ?? [];
   const profiles = snapshot?.voiceProfiles ?? [];
   return (

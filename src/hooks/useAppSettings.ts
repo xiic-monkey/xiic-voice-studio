@@ -46,10 +46,9 @@ export function useAppSettings({ desktopRuntime, run, setNotice }: Params) {
   const [ffmpegCheck, setFfmpegCheck] = useState<CheckState>(idleCheck("尚未检测"));
 
   useEffect(() => {
-    if (!desktopRuntime) {
-      setNotice(desktopRuntimeMessage);
-      return;
-    }
+    // 浏览器预览模式的提示由 SettingsView 静态横幅负责，
+    // 这里不再写 notice，避免与该横幅重复出现两遍同文案。
+    if (!desktopRuntime) return;
     invoke<AppSettings>("load_app_settings")
       .then((value) => {
         setLlmBaseUrl(value.llm.baseUrl);

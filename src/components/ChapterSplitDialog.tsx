@@ -3,6 +3,7 @@ import { Loader2, Sparkles, Wand2, X } from "lucide-react";
 import type { SplitPreview, SplitRuleDto } from "../types";
 import { text } from "../constants";
 import { errorMessage, invoke } from "../utils";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 type Mode = "heuristic" | "rule" | "custom";
 
@@ -29,6 +30,11 @@ export function ChapterSplitDialog({ sourcePath, llm, busy, onNotice, onClose, o
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [parsing, setParsing] = useState(false);
+
+  // 与关闭按钮保持一致：任务进行中不允许误触 Esc 关闭
+  useEscapeKey(true, () => {
+    if (!busy) onClose();
+  });
 
   // 载入内置拆章规则；默认选中第一条，保证「选择规则」模式有初始值。
   useEffect(() => {
