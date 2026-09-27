@@ -7,19 +7,21 @@ import {
   Library,
   Mic2,
   Pencil,
+  Play,
+  Plus,
   RefreshCw,
-  Save,
   Trash2,
+  UserPlus,
   UserRound,
   X,
 } from "lucide-react";
-import type { StudioSnapshot, VoiceProfile, VoiceStability } from "../types";
-import { MIMO_PRESET_VOICES, reviewIssueLabels, text } from "../constants";
+import type { StudioSnapshot } from "../types";
+import { reviewIssueLabels, text } from "../constants";
 import { displayJobType, displayStatus } from "../utils";
 import type { CharactersController } from "../hooks/useCharacters";
 import type { ReviewIssueType } from "../types";
 import { useEscapeKey } from "../hooks/useEscapeKey";
-import { EmptyState, Panel } from "./ui";
+import { EmptyState, HintTip, Panel } from "./ui";
 
 /* ---------- 角色面板 ---------- */
 
@@ -27,55 +29,25 @@ type CharacterPanelProps = {
   snapshot: StudioSnapshot | null;
   characters: CharactersController;
   busy: string;
-  onSetCharacterVoice: (characterId: string, voiceId: string) => void;
   onDesignVoice: (characterId: string, characterName: string) => void;
-  onFinalizeCharacterVoice: (characterId: string) => void;
+  /** 播放该角色已固化的克隆样本（不重新合成，直接放本地那份参考音频） */
+  onPreviewVoiceSample: (characterName: string, assetId: string) => void;
 };
 
-/** 角色声音的稳定性：预置 ID 和克隆样本可保证一致；描述式音色每次生成可能不同 */
-function voiceStability(profile: VoiceProfile | undefined): VoiceStability {
-  if (!profile) return "none";
-  if (profile.voiceAssetId) return "clone";
-  if (MIMO_PRESET_VOICES.includes(profile.voiceId)) return "preset";
-  return "design";
-}
-
-/** 角色音色选择：预置音色 ID 直接绑定（稳定）；描述式的当前值保留为选项并配警告 */
-function CharacterVoiceSelect({
-  characterId,
-  voiceId,
+export function CharacterPanel({
+  snapshot,
+  characters,
   busy,
-  onSave,
-}: {
-  characterId: string;
-  voiceId: string;
-  busy: string;
-  onSave: (characterId: string, voiceId: string) => void;
-}) {
-  const isPreset = MIMO_PRESET_VOICES.includes(voiceId);
-  return (
-    <select
-      className="character-voice-input"
-      aria-label="角色音色"
-      value={voiceId}
-      disabled={Boolean(busy)}
-      onClick={(event) => event.stopPropagation()}
-      onChange={(event) => onSave(characterId, event.target.value)}
-    >
-      {voiceId === "" && <option value="">未绑定音色</option>}
-      {!isPreset && voiceId !== "" && <option value={voiceId}>当前描述（音色不稳定）</option>}
-      {MIMO_PRESET_VOICES.filter((preset) => preset !== "mimo_default").map((preset) => (
-        <option key={preset} value={preset}>
-          {preset}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice, onDesignVoice, onFinalizeCharacterVoice }: CharacterPanelProps) {
+  onDesignVoice,
+  onPreviewVoiceSample,
+}: CharacterPanelProps) {
   const [mergeOpen, setMergeOpen] = useState(false);
-  useEscapeKey(mergeOpen, () => setMergeOpen(false));
+  const addOpen = characters.addingCharacter;
+  // 两个浮层互斥：同时开会互相遮挡，Esc 该关哪一个也说不清
+  useEscapeKey(mergeOpen || addOpen, () => {
+    setMergeOpen(false);
+    characters.cancelAddingCharacter();
+  });
   const list = snapshot?.characters ?? [];
   const profiles = snapshot?.voiceProfiles ?? [];
   return (
@@ -84,19 +56,67 @@ export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice
       icon={<UserRound size={16} />}
       className="character-panel"
       action={
-        <button
-          className="icon-button compact"
-          title="合并角色"
-          onClick={() => setMergeOpen((open) => !open)}
-        >
-          <Combine size={14} />
-        </button>
+        <>
+          <button
+            className="icon-button compact"
+            title={text.addCharacter}
+            onClick={() => {
+              setMergeOpen(false);
+              characters.startAddingCharacter();
+            }}
+          >
+            <UserPlus size={14} />
+          </button>
+          <button
+            className="icon-button compact"
+            title={text.mergeCharacters}
+            onClick={() => {
+              characters.cancelAddingCharacter();
+              setMergeOpen((open) => !open);
+            }}
+          >
+            <Combine size={14} />
+          </button>
+        </>
       }
     >
+      {addOpen && (
+        <>
+          <div className="popover-overlay" onClick={() => characters.cancelAddingCharacter()} />
+          <div className="character-popover">
+            <div className="merge-popover-title">{text.addCharacter}</div>
+            <input
+              autoFocus
+              value={characters.newCharacterName}
+              placeholder={text.characterNamePlaceholder}
+              onChange={(event) => characters.setNewCharacterName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") characters.createCharacter();
+              }}
+            />
+            <div className="inline">
+              <button
+                className="primary-action compact"
+                onClick={characters.createCharacter}
+                disabled={!characters.newCharacterName.trim() || Boolean(busy)}
+              >
+                <Plus size={14} />
+                {text.createCharacter}
+              </button>
+              <button className="ghost compact" onClick={characters.cancelAddingCharacter}>
+                {text.cancel}
+              </button>
+            </div>
+            <p className="merge-hint">
+              建好后会自动带一条默认音色；到剧本里把它的台词说话人改成它，分段就归到它名下。
+            </p>
+          </div>
+        </>
+      )}
       {mergeOpen && (
         <>
           <div className="popover-overlay" onClick={() => setMergeOpen(false)} />
-          <div className="character-merge-popover">
+          <div className="character-popover">
             <div className="merge-popover-title">合并角色</div>
             <select value={characters.mergeSourceId} onChange={(event) => characters.setMergeSourceId(event.target.value)}>
               <option value="">{text.sourceCharacter}</option>
@@ -124,40 +144,53 @@ export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice
       )}
       <div className="character-list">
         {list.map((character) => {
-          const boundProfile = profiles.find((voice) => voice.characterId === character.id);
-          const stability = voiceStability(boundProfile);
+          // 一个角色的音色是 1:N（按年龄阶段），这里把该角色**所有**档位拿出来，
+          // 而不是只取第一条——那条 `find` 正是把成长的音色时间轴压扁成 1:1 的地方。
+          const owned = profiles.filter((voice) => voice.characterId === character.id);
+          const primary = owned.find((voice) => !voice.isDefault) ?? owned[0];
+          const sampleAssetId = primary?.voiceAssetId;
           return (
           <div className="character-card" key={character.id}>
             <span className="swatch" style={{ backgroundColor: character.defaultColor }} />
-            <div>
-              <strong>{character.canonicalName}</strong>
-              <small>{character.aliases.join(", ") || text.noAliases}</small>
-              {stability === "clone" ? (
-                <small className="character-voice-fixed">已固化（克隆音色，音色稳定）</small>
-              ) : (
-                <CharacterVoiceSelect
-                  characterId={character.id}
-                  voiceId={boundProfile?.voiceId ?? ""}
-                  busy={busy}
-                  onSave={onSetCharacterVoice}
-                />
-              )}
-              {stability === "design" && (
-                <div className="voice-stability-warn">
-                  <span>描述式音色每次生成可能不同</span>
-                  <div className="voice-stability-actions">
-                    <button className="ghost compact" onClick={() => onDesignVoice(character.id, character.canonicalName)}>
-                      生成样本
-                    </button>
-                    <button className="ghost compact" onClick={() => onFinalizeCharacterVoice(character.id)}>
-                      固化音色
-                    </button>
-                  </div>
-                </div>
-              )}
+            <div className="character-card-body">
+              <div className="character-card-head">
+                <strong>{character.canonicalName}</strong>
+                {character.aliases.length > 0 && (
+                  <small className="character-aliases">{character.aliases.join("、")}</small>
+                )}
+              </div>
+              <div className="character-voice-line">
+                {sampleAssetId ? (
+                  <>
+                    <small className="character-voice-fixed">{text.voiceFixed}</small>
+                    <HintTip label={text.voiceFixed}>{text.voiceFixedHint}</HintTip>
+                  </>
+                ) : (
+                  <>
+                    <small className="character-voice-unfixed">{text.voiceUnfixed}</small>
+                    <HintTip label={text.voiceUnfixed}>{text.voiceUnfixedHint}</HintTip>
+                  </>
+                )}
+              </div>
             </div>
+            {/* 卡片右侧：只放图标按钮。口径是「能听 / 能改」两件事，
+                铅笔直接进角色声音工坊——改名和改音色是同一件「编辑」。 */}
             <div className="character-card-actions">
-              <button title="编辑角色" onClick={() => characters.startEditingCharacter(character)}>
+              {sampleAssetId && (
+                <button
+                  className="icon-button compact"
+                  title={`${text.previewVoiceSample}（${character.canonicalName}）`}
+                  disabled={Boolean(busy)}
+                  onClick={() => onPreviewVoiceSample(character.canonicalName, sampleAssetId)}
+                >
+                  <Play size={14} />
+                </button>
+              )}
+              <button
+                className="icon-button compact"
+                title={text.editCharacter}
+                onClick={() => onDesignVoice(character.id, character.canonicalName)}
+              >
                 <Pencil size={14} />
               </button>
             </div>
@@ -166,48 +199,6 @@ export function CharacterPanel({ snapshot, characters, busy, onSetCharacterVoice
         })}
         {!list.length && <p className="empty">{text.emptyCharacters}</p>}
       </div>
-      {characters.editingCharacterId && (
-        <div className="character-editor">
-          <div className="character-editor-title">编辑角色资料</div>
-          <input
-            value={characters.characterDraft.canonicalName}
-            placeholder="角色名"
-            onChange={(event) => characters.setCharacterDraft((current) => ({ ...current, canonicalName: event.target.value }))}
-          />
-          <input
-            value={characters.characterDraft.aliases}
-            placeholder="别名，用顿号分隔"
-            onChange={(event) => characters.setCharacterDraft((current) => ({ ...current, aliases: event.target.value }))}
-          />
-          <div className="inline">
-            <input
-              value={characters.characterDraft.gender}
-              placeholder="性别"
-              onChange={(event) => characters.setCharacterDraft((current) => ({ ...current, gender: event.target.value }))}
-            />
-            <input
-              value={characters.characterDraft.ageTimeline}
-              placeholder="年龄阶段或成长线"
-              onChange={(event) => characters.setCharacterDraft((current) => ({ ...current, ageTimeline: event.target.value }))}
-            />
-          </div>
-          <textarea
-            value={characters.characterDraft.notes}
-            placeholder="角色备注"
-            onChange={(event) => characters.setCharacterDraft((current) => ({ ...current, notes: event.target.value }))}
-          />
-          <div className="inline character-editor-actions">
-            <button onClick={characters.cancelEditingCharacter}>取消</button>
-            <button
-              className="primary-action"
-              onClick={characters.saveCharacter}
-              disabled={!characters.characterDraft.canonicalName.trim()}
-            >
-              <Save size={15} />保存角色
-            </button>
-          </div>
-        </div>
-      )}
     </Panel>
   );
 }
@@ -223,13 +214,18 @@ type VoicePanelProps = {
 };
 
 export function VoicePanel({ snapshot, busy, onSetNarratorVoice, onOpenVoiceCenter }: VoicePanelProps) {
-  const narratorProfile = (snapshot?.voiceProfiles ?? []).find((voice) => !voice.characterId);
+  const profiles = snapshot?.voiceProfiles ?? [];
+  // 用后端给出的 narratorProfileId 定位，而不是在前端按列表顺序猜：
+  // 猜错就会出现"改了旁白音色，界面上显示的却还是另一条"。
+  const narratorProfile =
+    profiles.find((voice) => voice.id === snapshot?.narratorProfileId) ??
+    profiles.find((voice) => !voice.characterId);
   return (
     <Panel title={text.voices} icon={<Mic2 size={16} />}>
       <div className="voice-panel-actions">
         <button className="primary-action" onClick={onOpenVoiceCenter} disabled={!snapshot}>
           <Library size={16} />
-          音色模仿
+          {text.voiceCenter}
         </button>
       </div>
       <div className="voice-list">
@@ -237,11 +233,21 @@ export function VoicePanel({ snapshot, busy, onSetNarratorVoice, onOpenVoiceCent
           <div className="voice-card-main">
             <strong>旁白</strong>
             <small>叙述、转场等非角色分段统一使用</small>
-            <NarratorVoiceInput
-              voiceId={narratorProfile?.voiceId ?? ""}
-              busy={busy}
-              onSave={onSetNarratorVoice}
-            />
+            <div className="character-voice-line">
+              <NarratorVoiceInput
+                voiceId={narratorProfile?.voiceId ?? ""}
+                busy={busy}
+                onSave={onSetNarratorVoice}
+              />
+              {(!narratorProfile || narratorProfile.isDefault) && (
+                <span className="voice-default-badge" title="系统自动兜底的音色，还没有人确认过">
+                  {text.defaultUnconfirmed}
+                </span>
+              )}
+            </div>
+            <span className="character-voice-note">
+              旁白按同一份档案解析，改一次即对全部旁白分段生效
+            </span>
           </div>
         </div>
       </div>

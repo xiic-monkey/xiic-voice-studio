@@ -2,8 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 import { formatAudioTime, sliderProgress } from "../utils";
 
-/** 自绘音频播放器：进度 / 音量滑杆带 CSS 变量填充，src 变化即重置。 */
-export function AudioPlayer({ src, label = "音频播放器" }: { src?: string; label?: string }) {
+/**
+ * 自绘音频播放器：进度 / 音量滑杆带 CSS 变量填充，src 变化即重置。
+ *
+ * `playSignal` 递增代表"现在就播"：分段列表里的「播放」按钮点一下就出声，
+ * 用户不需要再跑到这里点一次播放键。
+ */
+export function AudioPlayer({
+  src,
+  playSignal = 0,
+  label = "音频播放器",
+  onPlaybackBlocked,
+}: {
+  src?: string;
+  playSignal?: number;
+  label?: string;
+  onPlaybackBlocked?: () => void;
+}) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -19,6 +34,22 @@ export function AudioPlayer({ src, label = "音频播放器" }: { src?: string; 
     setCurrentTime(0);
     setDuration(0);
   }, [src]);
+
+  // 行内「播放」按钮：换源后自动起播；对同一条再点就从头重播。
+  // 声明在上面的 effect 之后，保证"先重置、再播放"的顺序。
+  const handledSignal = useRef(playSignal);
+  useEffect(() => {
+    if (playSignal === handledSignal.current) return;
+    handledSignal.current = playSignal;
+    const audio = audioRef.current;
+    if (!audio || !src) return;
+    // 换源那次已被上面的 effect 归零；同一条重播时要手动回到开头
+    if (audio.currentTime > 0) audio.currentTime = 0;
+    void audio.play().catch(() => {
+      setIsPlaying(false);
+      onPlaybackBlocked?.();
+    });
+  }, [playSignal, src, onPlaybackBlocked]);
 
   async function togglePlayback() {
     const audio = audioRef.current;

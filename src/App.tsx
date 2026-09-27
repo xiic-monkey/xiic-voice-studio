@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { Undo2 } from "lucide-react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import type { Chapter, ProductionCheckReport, SettingsSection, VoiceCenterSection } from "./types";
-import { desktopRuntimeMessage } from "./constants";
+import type { Chapter, ProductionCheckReport, Segment, SettingsSection, VoiceCenterSection } from "./types";
+import { desktopRuntimeMessage, text } from "./constants";
 
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -32,7 +33,20 @@ import { AudioPlayer } from "./components/AudioPlayer";
  */
 function App() {
   const desktopRuntime = isTauri();
-  const { busy, notice, setNotice, run } = useNotifier();
+  const { busy, notice, noticeTone, setNotice, undo, setUndo, clearUndo, run } = useNotifier();
+  // 全局提示同时以浮层呈现：弹窗遮罩会盖住底部提示条，
+  // 只提示在提示条里 = 用户点弹窗里的按钮失败时"看不到任何反应"。
+  const [dismissedNotice, setDismissedNotice] = useState("");
+  const toastVisible = notice !== text.ready && notice !== dismissedNotice;
+  useEffect(() => {
+    if (!toastVisible) return;
+    // 带「撤销」按钮的提示要多留一会儿，否则用户还没反应过来按钮就没了
+    const timer = setTimeout(() => {
+      setDismissedNotice(notice);
+      clearUndo();
+    }, undo ? undo.timeoutMs : 9000);
+    return () => clearTimeout(timer);
+  }, [notice, toastVisible, undo, clearUndo]);
 
   const editor = useSegmentEditor();
   const settings = useAppSettings({ desktopRuntime, run, setNotice });
@@ -54,6 +68,12 @@ function App() {
   });
 
   const [audioPath, setAudioPath] = useState("");
+  // 递增即"立刻播放"：分段列表点播放按钮后，底部播放器直接出声
+  const [audioPlaySignal, setAudioPlaySignal] = useState(0);
+  // 底部播放器展示的是"正在播的那条"，不是"选中的那条"——两者经常不是同一个
+  const [playingSegment, setPlayingSegment] = useState<Segment | null>(null);
+  // 非空表示播放器里装的是"某角色的固化样本"，而不是分段音频
+  const [playingSample, setPlayingSample] = useState("");
   const [productionReport, setProductionReport] = useState<ProductionCheckReport | null>(null);
   const [chapterPreviewOpen, setChapterPreviewOpen] = useState(false);
 
@@ -61,6 +81,8 @@ function App() {
     editor.clear();
     characters.resetMerge();
     setAudioPath("");
+    setPlayingSegment(null);
+    setPlayingSample("");
     setProductionReport(null);
     setChapterPreviewOpen(false);
   });
@@ -74,7 +96,12 @@ function App() {
     settings,
     editor,
     setAudioPath,
+    onRequestAudioPlayback: () => setAudioPlaySignal((value) => value + 1),
+    setPlayingSample,
     setProductionReport,
+    // 删除后的「撤销」直接挂在提示浮层上，不必再开一个弹窗
+    onUndoable: (message, action) =>
+      setUndo(message, { label: text.undoDelete, run: action }),
   });
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -82,6 +109,11 @@ function App() {
   const [voiceCenterOpen, setVoiceCenterOpen] = useState(false);
   const [importDialogPath, setImportDialogPath] = useState<string | null>(null);
   const [voiceDesignCharacter, setVoiceDesignCharacter] = useState<{ id: string; name: string } | null>(null);
+
+  /** 打开角色声音工坊：描述设计 → 试听 → 固化为该角色的音色 */
+  function openVoiceDesign(characterId: string, characterName: string) {
+    setVoiceDesignCharacter({ id: characterId, name: characterName });
+  }
 
   // 启动时自动恢复上次打开的项目；只跑一次，失败静默。
   const restoreRef = useRef(false);
@@ -113,6 +145,41 @@ function App() {
     setChapterPreviewOpen(true);
   }
 
+  /** 浮层提示：z-index 高于 modal-backdrop，弹窗里的失败也能被看到 */
+  function topToast() {
+    if (!toastVisible) return null;
+    // undo 非空就一定是这条提示的（setNotice 会把上一枚撤销按钮清掉），
+    // 所以不必再比对文案。
+    const handle = undo;
+    return (
+      <div className={`app-toast ${noticeTone}`} role={noticeTone === "error" ? "alert" : "status"}>
+        <span className="app-toast-text">{notice}</span>
+        {handle && (
+          <button
+            className="ghost compact app-toast-undo"
+            onClick={() => {
+              clearUndo();
+              setDismissedNotice(notice);
+              void handle.run();
+            }}
+          >
+            <Undo2 size={13} />
+            {handle.label}
+          </button>
+        )}
+        <button
+          className="ghost compact"
+          onClick={() => {
+            clearUndo();
+            setDismissedNotice(notice);
+          }}
+        >
+          知道了
+        </button>
+      </div>
+    );
+  }
+
   if (settingsOpen) {
     return (
       <SettingsView
@@ -137,7 +204,11 @@ function App() {
 
   const activeChapter = project.activeChapter;
   const selectedSegment = project.selectedSegment;
+  // 播放器里装的是哪条音频，就显示哪条；用户只是"选中"另一条时，播放器不该跟着变
+  const playerSegment = playingSegment ?? selectedSegment;
   const audioSrc = audioPath ? convertFileSrc(audioPath) : undefined;
+  const playerSpeaker = playingSample || playerSegment?.speaker || "旁白";
+  const playerText = playingSample ? text.voiceSamplePlaying : playerSegment?.text ?? "未选择分段";
 
   return (
     <main className="studio-shell">
@@ -173,6 +244,7 @@ function App() {
           chapters={project.chapters}
           activeChapterTitle={activeChapter?.title}
           activeChapterRawText={activeChapter?.rawText}
+          activeChapterId={activeChapter?.id}
           segments={project.segments}
           selectedSegmentId={selectedSegment?.id ?? ""}
           chapterPreviewOpen={chapterPreviewOpen}
@@ -181,6 +253,9 @@ function App() {
           editor={editor}
           onSaveSegmentDraft={actions.saveSegmentDraft}
           onDeleteSegment={actions.deleteSegment}
+          onSplitSegment={actions.splitSegment}
+          onMergeSegments={actions.mergeSegmentsAction}
+          onInsertSegment={actions.insertSegmentAfter}
           exportScope={{
             allChapters: project.exportScope.allChapters,
             selectedIds: project.exportScope.selectedIds,
@@ -190,7 +265,11 @@ function App() {
           onExport={actions.exportItem}
           onCheckProduction={actions.checkProductionReadiness}
           onExportEpisode={actions.exportEpisode}
-          onPlay={actions.playAudio}
+          onPlay={(segment) => {
+            setPlayingSample("");
+            setPlayingSegment(segment);
+            void actions.playAudio(segment);
+          }}
           onUpload={actions.uploadAudio}
           onRegenerate={(segment) => actions.generateTts([segment.id], true)}
         />
@@ -200,11 +279,8 @@ function App() {
             snapshot={project.snapshot}
             characters={characters}
             busy={busy}
-            onSetCharacterVoice={actions.setCharacterVoice}
-            onDesignVoice={(characterId: string, characterName: string) =>
-              setVoiceDesignCharacter({ id: characterId, name: characterName })
-            }
-            onFinalizeCharacterVoice={actions.finalizeCharacterVoice}
+            onDesignVoice={openVoiceDesign}
+            onPreviewVoiceSample={actions.previewVoiceAsset}
           />
           <VoicePanel
             snapshot={project.snapshot}
@@ -239,10 +315,15 @@ function App() {
 
       <footer className="player">
         <div>
-          <strong>{selectedSegment?.speaker || "旁白"}</strong>
-          <span>{selectedSegment?.text ?? "未选择分段"}</span>
+          <strong>{playerSpeaker}</strong>
+          <span>{playerText}</span>
         </div>
-        <AudioPlayer src={audioSrc} label="当前分段播放器" />
+        <AudioPlayer
+          src={audioSrc}
+          playSignal={audioPlaySignal}
+          label="当前分段播放器"
+          onPlaybackBlocked={() => setNotice("浏览器拦下了自动播放，请点一下播放器的播放键")}
+        />
         <span className="notice">{notice}</span>
       </footer>
 
@@ -254,6 +335,7 @@ function App() {
         voices={voices}
         onClose={() => setVoiceCenterOpen(false)}
         onSwitchSection={setVoiceCenterSection}
+        onDesignVoice={openVoiceDesign}
       />
 
       {voiceDesignCharacter && (
@@ -266,9 +348,21 @@ function App() {
             baseUrl: settings.llm.baseUrl,
             model: settings.llm.model,
             apiKey: settings.llm.apiKey,
+            keySaved: settings.llm.keySaved,
           }}
+          ttsKeySaved={settings.tts.keySaved}
           busy={busy}
           onNotice={setNotice}
+          onSaveProfile={async (characterId, draft) => {
+            const outcome = await characters.saveCharacterProfile(characterId, draft);
+            // 改名成功后同步弹窗标题用的名字，defaultSample 的兜底台词也跟着换
+            if (outcome.ok) {
+              setVoiceDesignCharacter((current) =>
+                current && current.id === characterId ? { ...current, name: draft.canonicalName } : current,
+              );
+            }
+            return outcome;
+          }}
           onClose={() => setVoiceDesignCharacter(null)}
           onFinalized={() => {
             setVoiceDesignCharacter(null);
@@ -276,6 +370,8 @@ function App() {
           }}
         />
       )}
+
+      {topToast()}
 
       {importDialogPath && (
         <ChapterSplitDialog

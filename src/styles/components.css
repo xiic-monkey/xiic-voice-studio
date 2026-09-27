@@ -166,20 +166,25 @@
 
 /*
   两行式布局：上排放窄控件，下排文本占满整宽。表头与正文共用同一套列模板。
-  最小宽度预算（1080 窗口中间列 552px，减去内边距 32 与列间距 40）：
-  列宽合计 460px = 32(index) + 76(type) + 76(speaker) + 76(char)
-              + 76(status, 徽章允许换行) + 124(actions, 四枚 28px 方钮 + 间距)。
-  各列再以 fr 分配富余空间，保证最小窗口不横向溢出。
+
+  第一行的分工是「左边元信息、右边状态与操作」，所以中间插一条 spacer 轨道吃掉富余空间。
+  以前 type/char 用 0.8fr / 1.6fr 把整行铺满，两个下拉被拉到 144px / 288px，第一行半屏都是空框。
+
+  列宽预算（1280 窗口主区 752px，减内边距 32 与列间距 40 → 可用 720px）：
+  32(index) + 100(type) + 150(char) + spacer(1fr, 1280 下约 97px)
+  + 96(status, 徽章允许换行) + 205(actions, 七枚 24px 方钮 + 分组分隔线) = 720。
+  min 值合计 573px，窄到装不下时 spacer 先归零、再压 min，操作列最后才 wrap 换行，
+  所以不会横向溢出。
 */
 .segment-row {
   border-bottom: 1px solid var(--border-subtle);
   column-gap: var(--sp-2);
   display: grid;
   grid-template-areas:
-    "index type char status actions"
-    "text  text text  text  text";
+    "index type char spacer status actions"
+    "text  text text text   text   text";
   grid-template-columns:
-    32px minmax(84px, 0.8fr) minmax(140px, 1.6fr) minmax(96px, auto) 128px;
+    32px minmax(88px, 100px) minmax(112px, 150px) minmax(0, 1fr) minmax(96px, max-content) auto;
   padding: var(--sp-3) var(--sp-4);
   row-gap: var(--sp-2);
   transition: background-color var(--duration-fast) var(--ease);
@@ -276,18 +281,29 @@
   min-height: var(--control-h);
 }
 
+/* 操作列：结构编辑（拆分 / 合并 / 插入）与音频操作（播放 / 上传 / 重生成 / 删除）同排，
+   中间一条竖线分组 —— 前者改的是分段结构，后者动的是音频，语义不同但都属于"这一段"。 */
 .segment-actions {
   display: flex;
-  gap: var(--sp-2);
+  flex-wrap: wrap;
+  gap: var(--sp-1);
   justify-content: flex-end;
 }
 
-/* 行内操作用小方按钮：四枚（播放/上传/重生成/删除）总量控制在操作列 140px 内，
-   否则 justify-content: flex-end 会让溢出部分左移压住状态徽章 */
+/* 七枚方钮挤在一列，尺寸收到 24px；再大就装不下，或把状态徽章挤走 */
 .segment-actions button {
-  min-height: var(--control-h-sm);
-  min-width: var(--control-h-sm);
+  min-height: var(--control-h-xs);
+  min-width: var(--control-h-xs);
   padding: 0;
+}
+
+.segment-actions-divider {
+  align-self: center;
+  background: var(--border-default);
+  flex: 0 0 auto;
+  height: 14px;
+  margin: 0 var(--sp-1);
+  width: 1px;
 }
 
 /* ---------- 状态徽章 ---------- */
@@ -484,6 +500,135 @@
   margin: 0;
 }
 
+/* 工坊内的即时反馈：任何一步的成败都必须在弹窗里说清楚 */
+.voice-flow-status {
+  align-items: flex-start;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  display: flex;
+  font-size: var(--fs-2xs);
+  gap: var(--sp-2);
+  line-height: var(--lh-normal);
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.voice-flow-status svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.voice-flow-status.error {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.voice-flow-status.success {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-text);
+}
+
+.voice-flow-head-actions {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-1);
+}
+
+/* 章节上下文：告诉用户"描述是从哪来的" */
+.voice-context {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.voice-context-lines {
+  color: var(--text-tertiary);
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-2xs);
+  gap: var(--sp-1);
+  list-style: none;
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: var(--sp-2);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+}
+
+/* 全局浮层提示：必须盖住 modal-backdrop（z-index 50） */
+.app-toast {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  bottom: var(--sp-5);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  gap: var(--sp-3);
+  left: 50%;
+  max-width: min(760px, calc(100vw - 48px));
+  padding: var(--sp-2) var(--sp-3);
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 60;
+}
+
+.app-toast.error {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.app-toast-text {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+}
+
+/* 「撤销」是本浮层上唯一有副作用的动作，必须比旁边的「知道了」显眼 */
+.app-toast-undo {
+  align-items: center;
+  color: var(--accent);
+  display: inline-flex;
+  font-weight: 600;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.app-toast-undo:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+/* 空章节：光有一句灰字等于没有入口，按钮要在这里给出路 */
+.empty-table {
+  align-items: center;
+  color: var(--text-tertiary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-8) var(--sp-4);
+  text-align: center;
+}
+
+.empty-table-text {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  margin: 0;
+  max-width: 42ch;
+}
+
+/* 空章节里的插入框：跟行内插入框同一套结构，只是没有左边的序号列 */
+.empty-insert-box {
+  text-align: left;
+  width: min(100%, 560px);
+}
+
 /* 角色卡内嵌音色 ID 输入：音色是角色的属性 */
 .character-voice-input {
   font-size: var(--fs-2xs);
@@ -494,7 +639,12 @@
 .character-voice-fixed {
   color: var(--success-text);
   font-size: var(--fs-2xs);
-  margin-top: var(--sp-1);
+}
+
+/* 未固化：与「已固化」同位的中性灰提示，旁边跟 ? 气泡引导去工坊 */
+.character-voice-unfixed {
+  color: var(--text-tertiary);
+  font-size: var(--fs-2xs);
 }
 
 /* 分段文本区：正文 + 情绪标注 */
@@ -506,10 +656,73 @@
   min-width: 0;
 }
 
+/* 输入框常驻标签：填了内容后仍然分得清哪格是文本、哪格是情绪。
+   没有它，两个白底圆角框里各有一行字，就只能靠猜。 */
+.segment-field {
+  align-items: flex-start;
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.segment-field-label {
+  color: var(--text-tertiary);
+  /* 与序号列同宽（32px）且右对齐：标签右缘 = 「1」的右缘，
+     控件左缘 = 「台词」下拉的左缘 —— 全表只剩 264/304 两条竖线 */
+  flex: 0 0 32px;
+  font-size: var(--fs-2xs);
+  /* 与控件首行的中心线对齐：控件 4px 内边距 + 1px 边框，标签自身行高 1.7×11px */
+  line-height: 1.7;
+  padding-top: 5px;
+  text-align: right;
+  user-select: none;
+}
+
+/* 情绪输入框比正文框矮（32px 单行），标签再上提 2px 才与框内文字居中 */
+.segment-field:has(> .segment-emotion) .segment-field-label {
+  padding-top: 3px;
+}
+
+/* 控件吃掉标签之外的全部宽度；min-width 归零，窄栏下才不会被撑破 */
+.segment-field > .segment-text,
+.segment-field > .segment-emotion {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .segment-emotion {
   font-size: var(--fs-2xs);
   min-height: var(--control-h-sm);
   width: auto;
+}
+
+/* 插入分段的内联编辑器 */
+.segment-insert-box {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-sidebar);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+}
+
+.segment-insert-box .segment-text {
+  min-height: 48px;
+}
+
+.segment-insert-bar {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.segment-insert-bar select {
+  flex: 0 0 auto;
+  /* 全局 `select { width: 100% }` 会把这里拉满整条 bar（且 flex-shrink:0 不可收缩），
+     把「插入 / 取消」顶出容器右缘 —— 必须显式收回 auto 宽度 */
+  width: auto;
+  min-width: 96px;
 }
 
 /* 角色面板：合并入口与弹层 */
@@ -522,7 +735,12 @@
   margin-left: auto;
 }
 
-.character-merge-popover {
+.panel.character-panel .panel-action {
+  gap: var(--sp-1);
+}
+
+/* 「新增角色」「合并角色」共用的浮层：都挂在面板标题下方 */
+.character-popover {
   background: var(--bg-surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
@@ -549,28 +767,74 @@
   margin: 0;
 }
 
-.voice-stability-warn {
-  align-items: center;
+/* 角色卡的音色区：选择器 + 默认标记 + 工坊入口常驻（不再依赖音色"档位"猜入口） */
+.character-card-body {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
-  margin-top: var(--sp-1);
+  min-width: 0;
 }
 
-.voice-stability-actions {
+/* 名字与别名同行：别名是识别用的补充信息，单占一行只会把卡片撑高 */
+.character-card-head {
+  align-items: baseline;
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+
+.character-aliases {
+  color: var(--text-tertiary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 紧凑断点（窗口 ≤1280px）下右侧栏只有 280px，卡片正文列实测只剩 127px。
+   行内元素挤不下时会一路压到 min-content（一个汉字一列），所以这里允许换行：
+   basis 用 auto 而不是 0 —— basis 为 0 的 flex 子项永远不会触发换行，只会被压缩。 */
+.character-voice-line {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-1);
+  min-width: 0;
 }
 
-.voice-stability-warn > span {
+.character-voice-line .character-voice-input {
+  flex: 1 1 auto;
+  /* 不给下限的话，下拉框会被自己的 min-content 压成「当·」那么窄，看起来像坏了 */
+  min-width: 88px;
+  margin-top: 0;
+}
+
+.voice-default-badge {
+  background: var(--warn-bg);
+  border-radius: var(--r-full);
   color: var(--warn-text);
+  flex-shrink: 0;
   font-size: var(--fs-2xs);
+  padding: 0 var(--sp-2);
+  white-space: nowrap;
 }
 
-/* 三列：色块 / 主信息 / 操作 */
+/* 卡片上的说明不再常驻，改成「?」图标按需展开（.hint-tip 在下方） */
+.character-voice-note {
+  color: var(--text-tertiary);
+  /* 同上：basis 用 auto，说明文字才会在挤不下时换行，
+     而不是被压成一列一个汉字。 */
+  flex: 1 1 auto;
+  font-size: var(--fs-2xs);
+  min-width: 0;
+}
+
+/* 三列：色块 / 主信息 / 图标按钮 */
 .character-card {
   grid-template-columns: 12px minmax(0, 1fr) auto;
   min-height: 48px;
+  /* 「?」气泡的定位基准 —— 气泡贴卡片左右内边距展开，
+     这样在 280px 紧凑右栏里也不会撑出横向滚动条 */
+  position: relative;
 }
 
 .character-card strong {
@@ -627,33 +891,69 @@
   width: 12px;
 }
 
+/* 操作区统一为图标按钮，顶到卡片右上角与名字对齐 */
 .character-card-actions {
+  align-self: start;
   display: flex;
   gap: var(--sp-1);
+  grid-column: 3;
 }
 
-/* ---------- 角色编辑 ---------- */
-.character-editor {
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-subtle);
+.character-card-actions .icon-button {
+  color: var(--text-secondary);
+}
+
+/* ---------- 「?」提示气泡 ---------- */
+.hint-tip {
+  display: inline-flex;
+}
+
+button.hint-tip-trigger {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-full);
+  color: var(--text-tertiary);
+  display: inline-flex;
+  height: 14px;
+  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  width: 14px;
+}
+
+button.hint-tip-trigger:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent);
+}
+
+/* 气泡锚在 .character-card 上（见上面的 position: relative），
+   所以宽度天然被卡片约束，不会把 inspector 撑出横向滚动。 */
+.hint-tip-bubble {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
   border-radius: var(--r-sm);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
+  box-shadow: var(--shadow-md);
+  color: var(--text-secondary);
+  font-size: var(--fs-2xs);
+  left: var(--sp-3);
+  line-height: var(--lh-normal);
+  opacity: 0;
+  padding: var(--sp-2);
+  pointer-events: none;
+  position: absolute;
+  right: var(--sp-3);
+  top: calc(100% + var(--sp-1));
+  transition: opacity var(--duration-fast) var(--ease);
+  white-space: normal;
+  z-index: 30;
 }
 
-.character-editor-title {
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-}
-
-.character-editor textarea {
-  min-height: 56px;
-}
-
-.character-editor-actions {
-  justify-content: flex-end;
+.hint-tip:hover .hint-tip-bubble,
+.hint-tip:focus-within .hint-tip-bubble {
+  opacity: 1;
 }
 
 /* ---------- 审听面板 ---------- */
@@ -777,6 +1077,36 @@
   margin: 0;
 }
 
+/* 工坊头部：标题位是可编辑的角色名（这个弹窗就是"编辑角色"页） */
+.voice-center-header-actions {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.character-name-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  margin-left: calc(-1 * var(--sp-2));
+  max-width: 360px;
+  padding: 2px var(--sp-2);
+  width: 100%;
+}
+
+.character-name-input:hover {
+  border-color: var(--border-subtle);
+}
+
+.character-name-input:focus {
+  background: var(--bg-surface);
+  border-color: var(--accent);
+  outline: none;
+}
+
 .voice-center-body {
   display: grid;
   grid-template-columns: 192px minmax(0, 1fr);
@@ -833,6 +1163,40 @@
 .section-heading span {
   color: var(--text-secondary);
   font-size: var(--fs-xs);
+}
+
+/* 声音中心：按说话人分组的音色总览（音色的归属就是角色，不再平铺成"声音库"） */
+.voice-group {
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-3);
+}
+
+.voice-group:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.voice-group-head {
+  align-items: center;
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.voice-group-head strong {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+.voice-group-head > span {
+  color: var(--text-tertiary);
+  font-size: var(--fs-2xs);
+}
+
+.voice-group-head .ghost {
+  margin-left: auto;
 }
 
 .voice-library-list {

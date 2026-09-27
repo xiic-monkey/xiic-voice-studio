@@ -3,10 +3,12 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   Chapter,
+  DeletedSegment,
   ProductionCheckReport,
   ReviewIssueType,
   Segment,
   SegmentDraft,
+  SegmentType,
   StudioJob,
   StudioSnapshot,
 } from "../types";
@@ -25,7 +27,20 @@ type Params = {
   settings: AppSettingsController;
   editor: SegmentEditorController;
   setAudioPath: (path: string) => void;
+  /** 让底部播放器立刻出声（分段列表的「播放」按钮点一下就该开始播）。 */
+  onRequestAudioPlayback: () => void;
+  /**
+   * 底部播放器正在播的其实是"哪个角色的固化样本"，而不是某个分段。
+   * 空串 = 回到分段语义。播放器头部要据此换标题，否则会出现
+   * "角色样本在响、标题却写着上一个分段"的错位。
+   */
+  setPlayingSample: (label: string) => void;
   setProductionReport: (report: ProductionCheckReport | null) => void;
+  /**
+   * 登记一次可撤销的操作。由 App 层挂到提示浮层上，
+   * 用户点「撤销」即原样恢复（目前用于删除分段）。
+   */
+  onUndoable: (message: string, undo: () => void | Promise<void>) => void;
 };
 
 /**
@@ -40,7 +55,10 @@ export function useStudioActions({
   settings,
   editor,
   setAudioPath,
+  onRequestAudioPlayback,
+  setPlayingSample,
   setProductionReport,
+  onUndoable,
 }: Params) {
   const [projectTitle, setProjectTitle] = useState("新有声项目");
   const [author, setAuthor] = useState("");
@@ -103,23 +121,6 @@ export function useStudioActions({
     return true;
   }
 
-  async function setCharacterVoice(characterId: string, voiceId: string) {
-    const saved = await run(
-      "保存角色音色",
-      () =>
-        invoke<StudioSnapshot>("set_character_voice", {
-          request: {
-            characterId,
-            voiceId,
-            ttsProvider: settings.tts.provider,
-            model: settings.tts.model || undefined,
-          },
-        }),
-      project.hydrateSnapshot,
-    );
-    if (saved) setNotice("角色音色已更新，重新生成后生效");
-  }
-
   /** 用该角色最近生成的试听样本固化音色（voiceclone） */
   async function finalizeCharacterVoice(characterId: string) {
     const saved = await run(
@@ -130,7 +131,7 @@ export function useStudioActions({
         }),
       project.hydrateSnapshot,
     );
-    if (saved) setNotice("角色音色已固化（克隆模式），重新生成后生效");
+    if (saved) setNotice("角色音色已固化（克隆模式），未审听的分段已标记为待重新生成");
   }
 
   async function setNarratorVoice(voiceId: string) {
@@ -210,11 +211,19 @@ export function useStudioActions({
     const characterId = Object.prototype.hasOwnProperty.call(patch, "characterId")
       ? patch.characterId ?? ""
       : (segment.characterId ?? "");
+    // 情绪：patch 里带了就用 patch（含"清空"），没带就沿用分段原值；
+    // 空白串按"没有情绪"处理，交给后端落 NULL。
+    const normalizedEmotion = (
+      Object.prototype.hasOwnProperty.call(patch, "emotion")
+        ? patch.emotion ?? ""
+        : segment.emotion ?? ""
+    ).trim();
     const submittedDraft: SegmentDraft = {
       text: patch.text ?? segment.text,
       segmentType: patch.segmentType ?? segment.segmentType,
       speaker: speaker ?? "",
       characterId,
+      emotion: normalizedEmotion,
     };
     const saved = await run(
       text.savingSegment,
@@ -226,7 +235,9 @@ export function useStudioActions({
             segmentType: patch.segmentType ?? segment.segmentType,
             speaker,
             characterId: characterId || undefined,
-            emotion: patch.emotion ?? segment.emotion,
+            // 空串统一送 undefined（后端落 NULL）：否则库里会留 `''`，
+            // 且"清空情绪"与"本来就是空"会被当成两次不同的改动。
+            emotion: normalizedEmotion || undefined,
             soundCue: patch.soundCue ?? segment.soundCue,
             anchor: patch.anchor ?? segment.anchor,
           },
@@ -244,17 +255,95 @@ export function useStudioActions({
       segmentType: draft.segmentType,
       speaker: draft.speaker,
       characterId: draft.characterId ?? "",
+      // 情绪是分段上唯一可人工编辑的"表演提示"，必须随草稿提交；
+      // 漏掉它时 `saveSegment` 会回退成 `segment.emotion`（原值），
+      // 表现就是"改了情绪、生成了音频，却听不出任何变化"。
+      emotion: draft.emotion ?? "",
     });
   }
 
+  /**
+   * 删除分段。**不再弹确认框，改成删除后可撤销。**
+   *
+   * 确认框是"每次都要读一遍、但没人真读"的固定成本，而误触是低频事件；
+   * 把代价挪到真正删错的那一次，用户平时少一步操作，删错时也丢不了东西
+   * （后端是归档式删除，连磁盘音频都还在）。
+   */
   async function deleteSegment(segment: Segment) {
-    if (!window.confirm(`删除分段 ${segment.orderIndex + 1}？其音频记录和审听备注会一并删除，磁盘上的音频文件也会清理。`)) return;
     const saved = await run(
-      "删除分段",
+      text.deletingSegment,
       () => invoke<StudioSnapshot>("delete_segment", { segmentId: segment.id }),
       project.hydrateSnapshot,
     );
+    if (!saved) return;
+    editor.drop(segment.id, editor.draftFor(segment));
+    // 从新快照里取回刚归档的那条，撤销时才有准确的 id 可恢复
+    const archived = saved.deletedSegments.find((item) => item.id === segment.id);
+    if (archived) {
+      onUndoable(
+        `已删除第 ${segment.orderIndex + 1} 句，${text.undoHint}`,
+        () => restoreSegment(archived),
+      );
+    }
+  }
+
+  /** 撤销删除：把归档的分段连同音频与审听备注一起插回原位。 */
+  async function restoreSegment(archived: DeletedSegment) {
+    await run(
+      text.restoringSegment,
+      () => invoke<StudioSnapshot>("restore_segment", { segmentId: archived.id }),
+      project.hydrateSnapshot,
+    );
+  }
+
+  /** 在字符偏移处把分段拆成两句。左半沿用原段，右半新建。 */
+  async function splitSegment(segment: Segment, offset: number) {
+    const saved = await run(
+      "拆分分段",
+      () => invoke<StudioSnapshot>("split_segment", { request: { segmentId: segment.id, offset } }),
+      project.hydrateSnapshot,
+    );
     if (saved) editor.drop(segment.id, editor.draftFor(segment));
+  }
+
+  /** 合并相邻分段（按传入顺序）。 */
+  async function mergeSegmentsAction(ids: string[]) {
+    if (ids.length < 2) {
+      setNotice("合并至少需要选择两个相邻分段");
+      return;
+    }
+    const saved = await run(
+      "合并分段",
+      () => invoke<StudioSnapshot>("merge_segments", { request: { segmentIds: ids } }),
+      project.hydrateSnapshot,
+    );
+    if (saved) editor.clear();
+  }
+
+  /**
+   * 插入新分段（补录漏掉的台词）。
+   * `afterSegment` 传 null = 插到章首，空章节的「添加第一句」走这条。
+   */
+  async function insertSegmentAfter(
+    afterSegment: Segment | null,
+    payload: { text: string; segmentType: SegmentType; characterId?: string; speaker?: string },
+  ) {
+    if (!project.activeChapterId) return;
+    await run(
+      "插入分段",
+      () =>
+        invoke<StudioSnapshot>("insert_segment", {
+          request: {
+            chapterId: project.activeChapterId,
+            afterSegmentId: afterSegment?.id,
+            text: payload.text,
+            segmentType: payload.segmentType,
+            characterId: payload.characterId || undefined,
+            speaker: payload.speaker || undefined,
+          },
+        }),
+      project.hydrateSnapshot,
+    );
   }
 
   async function assignVoice(character?: { id: string; canonicalName: string }) {
@@ -332,7 +421,35 @@ export function useStudioActions({
     const path = await run(text.loadingAudio, () =>
       invoke<string | null>("play_segment_audio", { segmentId: segment.id }),
     );
-    if (path) setAudioPath(path);
+    if (path) {
+      setPlayingSample("");
+      setAudioPath(path);
+      // 装进播放器还不够——用户点的是「播放」，就该直接出声
+      onRequestAudioPlayback();
+    } else {
+      // 别静默失败：缺失/未生成的分段点了要有反馈
+      setNotice("这个分段还没有可播放的音频，请先重新生成或上传");
+    }
+  }
+
+  /**
+   * 试听角色已固化的克隆样本。故意**不**走 test_voice_profile：
+   * 那条链路会重新请求云端合成，既慢又要花钱，而用户想听的是
+   * "固化下来的到底是哪个声音"，本地那份参考音频就是唯一答案。
+   */
+  async function previewVoiceAsset(characterName: string, assetId: string) {
+    const path = await run(text.previewVoiceSample, () =>
+      invoke<string | null>("voice_asset_audio_path", { assetId }),
+    );
+    // 命令返回 null 有两种情况：档案根本没绑资产、或样本文件被外部删了。
+    // 两种都播不了，所以给同一句可行动的提示，而不是静默无反应。
+    if (!path) {
+      setNotice(`${characterName} 的固化样本找不到文件了，请重新设计音色`);
+      return;
+    }
+    setPlayingSample(characterName);
+    setAudioPath(path);
+    onRequestAudioPlayback();
   }
 
   async function uploadAudio(segment?: Segment) {
@@ -477,7 +594,6 @@ export function useStudioActions({
     openProject,
     openLastProject,
     saveSegmentRecording,
-    setCharacterVoice,
     setNarratorVoice,
     finalizeCharacterVoice,
     beginImport,
@@ -487,6 +603,10 @@ export function useStudioActions({
     saveSegment,
     saveSegmentDraft,
     deleteSegment,
+    restoreSegment,
+    splitSegment,
+    mergeSegmentsAction,
+    insertSegmentAfter,
     assignVoice,
     generateTts,
     cancelJob,
@@ -494,6 +614,7 @@ export function useStudioActions({
     deleteJob,
     clearFinishedJobs,
     playAudio,
+    previewVoiceAsset,
     uploadAudio,
     setAudioReviewStatus,
     addReviewIssue,

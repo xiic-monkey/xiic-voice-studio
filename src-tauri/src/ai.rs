@@ -305,23 +305,87 @@ pub async fn chat_completion(
     Ok(text.trim().to_string())
 }
 
-/// 根据角色信息与台词样本，生成符合 Mimo voicedesign 最佳实践的音色描述。
+/// 音色描述生成的系统提示词。
+///
+/// 旧版本的提示词只给了"台词样本"这一项，而样本里常常混着成段叙述，
+/// 模型于是直接把原文抄回来。这里把要求写死：只输出概括性描述，
+/// 不许出现引号/对白/原文句子。
+const VOICE_DESCRIPTION_SYSTEM: &str = "你是中文有声书配音导演。根据角色资料、该角色的台词样本，以及章节里关于该角色的叙述，为该角色撰写一段用于 TTS 音色设计（voicedesign）的中文音色描述。要求：\
+1) 1-3 句，60-120 字；\
+2) 依次覆盖：性别与年龄段、音色质感（音高、明亮或低沉、是否沙哑等）、语气性格、语速节奏；\
+3) 与角色性格和台词风格一致，允许从叙述线索推断，但不得编造与人物无关的设定；\
+4) 只返回描述文本本身，不要任何前缀、序号、引号或解释。\
+严禁照抄参考资料原文，严禁在描述里出现任何对白或引号。";
+
+const VOICE_DESCRIPTION_STRICT: &str = "注意：上一次的回答把参考资料原文抄了回来，这是错误的。\
+这一次只输出概括性的音色描述，绝对不要出现任何原文句子、对白、引号或书名号，也不要出现「音色描述」这样的前缀。";
+
+/// 根据角色资料、台词样本与章节叙述，生成符合 Mimo voicedesign 最佳实践的音色描述。
 pub async fn generate_voice_description(
     character_name: &str,
     character_info: &str,
-    dialogue_samples: &str,
+    lines: &[String],
+    narration: &[String],
     settings: LlmSettings,
+    strict: bool,
 ) -> StudioResult<String> {
-    let system = "你是中文有声书配音导演。根据角色的性别、年龄、性格与台词风格，为该角色撰写一段用于 TTS 音色设计的音色描述。要求：1-4 句中文，覆盖性别与年龄段、音色质感、说话语气、语速节奏；与角色性格和台词风格一致；只返回描述文本本身，不要任何前缀、引号或解释。";
+    let system = if strict {
+        format!("{VOICE_DESCRIPTION_SYSTEM}\n{VOICE_DESCRIPTION_STRICT}")
+    } else {
+        VOICE_DESCRIPTION_SYSTEM.to_string()
+    };
     let user = format!(
-        "角色：{character_name}\n角色资料：{character_info}\n台词样本：\n{dialogue_samples}"
+        "角色：{character_name}\n角色资料：{character_info}\n台词样本（该角色自己说的话）：\n{}\n相关叙述（章节里关于该角色的描写，仅供推断气质）：\n{}",
+        bullet_list(lines),
+        bullet_list(narration),
     );
-    let text = chat_completion(settings, system, &user).await?;
+    let text = chat_completion(settings, &system, &user).await?;
     if text.trim().is_empty() {
         return Err(err("LLM 未返回音色描述"));
     }
     Ok(text)
 }
+
+fn bullet_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "（无）".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {}", item.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 判定 LLM 返回的文本是否「不像音色描述」（照抄原文、带引号、过长等）。
+/// 命中时返回人话原因，用于触发一次严格重试或回退到本地草稿。
+pub fn invalid_voice_description_reason(text: &str, lines: &[String]) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some("LLM 未返回音色描述".to_string());
+    }
+    let length = trimmed.chars().count();
+    if length > 200 {
+        return Some(format!("返回 {length} 字，过长，疑似照抄章节原文"));
+    }
+    if trimmed
+        .chars()
+        .any(|character| matches!(character, '“' | '”' | '「' | '」' | '『' | '』' | '"'))
+    {
+        return Some("返回内容含引号或对白，疑似照抄章节原文".to_string());
+    }
+    for line in lines {
+        let normalized = line.trim();
+        if normalized.chars().count() < 8 {
+            continue;
+        }
+        if trimmed.contains(normalized) || normalized.contains(trimmed) {
+            return Some("返回内容与台词原文重叠，疑似照抄".to_string());
+        }
+    }
+    None
+}
+
 
 pub async fn test_openai_compatible(settings: LlmSettings) -> StudioResult<String> {    let base_url = settings
         .base_url
@@ -630,7 +694,8 @@ fn normalized_segment_type(value: &str) -> Option<&'static str> {
     }
 }
 
-fn pick_character_color(seed: &str) -> &'static str {
+/// 按名字稳定地挑一个角色色：同名的角色每次都会得到同一个颜色。
+pub(crate) fn pick_character_color(seed: &str) -> &'static str {
     let colors = [
         "#2f80ed", "#27ae60", "#b55400", "#9b51e0", "#c0392b", "#118c8c",
     ];
@@ -677,5 +742,7 @@ pub fn extract_characters(conn: &Connection, project_id: &str) -> StudioResult<(
             params![character_id, speaker],
         )?;
     }
+    // 新识别出的角色立刻带上一条默认音色，保证「每个角色有自己的固定音色」自标注起成立。
+    crate::tts::ensure_default_voice_profiles(conn, project_id)?;
     Ok(())
 }

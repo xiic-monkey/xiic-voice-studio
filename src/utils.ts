@@ -1,12 +1,18 @@
 import { type CSSProperties } from "react";
 import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import { desktopRuntimeMessage, jobTypeLabels, statusLabels } from "./constants";
+import { devPreviewEnabled, mockInvoke } from "./dev/preview";
 
 /**
  * 统一的 Tauri 调用入口。浏览器预览模式下直接给出可读错误，
- * 避免每个调用点各写一遍 isTauri 判断。
+ * 避免每个调用点各写一遍 isTauri 判断；
+ * 有夹具的命令（如角色声音工坊那条链路）走假后端，让 UI 能完整预览。
  */
 export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (devPreviewEnabled) {
+    const mocked = mockInvoke(command, args);
+    if (mocked) return mocked as Promise<T>;
+  }
   if (!isTauri()) {
     return Promise.reject(new Error(desktopRuntimeMessage));
   }

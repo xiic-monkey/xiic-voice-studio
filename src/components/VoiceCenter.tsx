@@ -1,7 +1,7 @@
 import { FolderSearch, Library, Loader2, Mic2, Pencil, Play, Save, ShieldCheck, Trash2, X } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { StudioSnapshot, VoiceAsset, VoiceProfile } from "../types";
-import { ageStageLabels } from "../constants";
+import { ageStageLabels, text } from "../constants";
 import type { VoiceProfilesController } from "../hooks/useVoiceProfiles";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { AudioPlayer } from "./AudioPlayer";
@@ -14,9 +14,10 @@ type Props = {
   voices: VoiceProfilesController;
   onClose: () => void;
   onSwitchSection: (section: "library" | "clone") => void;
+  onDesignVoice: (characterId: string, characterName: string) => void;
 };
 
-export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, onSwitchSection }: Props) {
+export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, onSwitchSection, onDesignVoice }: Props) {
   useEscapeKey(open, onClose);
   if (!open) return null;
   const profiles = snapshot?.voiceProfiles ?? [];
@@ -26,13 +27,26 @@ export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, on
     characterId
       ? snapshot?.characters.find((character) => character.id === characterId)?.canonicalName ?? "未知角色"
       : "旁白";
+  // 音色的唯一真源是角色，所以这里按说话人分组展示，而不是平铺成一张"声音库"清单。
+  const groups = new Map<string, VoiceProfile[]>();
+  for (const profile of profiles) {
+    const key = profile.characterId ?? "";
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(profile);
+    else groups.set(key, [profile]);
+  }
+  const orderedGroups = [...groups.entries()].sort(([left], [right]) => {
+    if (left === "" && right !== "") return -1;
+    if (right === "" && left !== "") return 1;
+    return characterName(left || undefined).localeCompare(characterName(right || undefined), "zh-Hans-CN");
+  });
 
   return (
     <div className="modal-backdrop">
       <section className="voice-center" role="dialog" aria-modal="true" aria-labelledby="voice-center-title">
         <header className="voice-center-header">
           <div>
-            <span>项目声音资产</span>
+            <span>每个说话人的音色归属</span>
             <h1 id="voice-center-title">声音中心</h1>
           </div>
           <button className="icon-button" title="关闭声音中心" onClick={onClose}>
@@ -47,7 +61,7 @@ export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, on
               onClick={() => onSwitchSection("library")}
             >
               <Library size={16} />
-              声音库
+              音色总览
             </button>
             <button
               className={section === "clone" ? "selected" : ""}
@@ -64,62 +78,87 @@ export function VoiceCenter({ open, section, snapshot, busy, voices, onClose, on
               <section className="voice-library">
                 <div className="section-heading">
                   <div>
-                    <h2>项目声音</h2>
-                    <span>{profiles.length} 个声音档案 · {assets.length} 个本地音色资产</span>
+                    <h2>角色音色总览</h2>
+                    <span>
+                      {orderedGroups.length} 个说话人 · {profiles.length} 个音色档案 · {assets.length} 个本地音色资产
+                    </span>
                   </div>
                   <button className="primary-action" onClick={() => onSwitchSection("clone")}>
-                    <Mic2 size={16} />创建模仿音色
+                    <Mic2 size={16} />用参考音频克隆
                   </button>
                 </div>
                 <div className="voice-library-list">
-                  {profiles.map((profile) => {
-                    const asset = profile.voiceAssetId ? assetById.get(profile.voiceAssetId) : undefined;
-                    const editing = voices.editingVoiceProfileId === profile.id;
-                    return (
-                      <div className="voice-library-entry" key={profile.id}>
-                        <article className="voice-library-row">
-                          <div className="voice-library-icon"><Mic2 size={17} /></div>
-                          <div className="voice-library-main">
-                            <strong>{profile.name}</strong>
-                            <span>{characterName(profile.characterId)} · {ageStageLabels[profile.ageStage] ?? profile.ageStage}</span>
-                          </div>
-                          <div className="voice-library-meta">
-                            <span className={`voice-kind ${asset ? "clone" : ""}`}>
-                              {asset ? "模仿音色" : profile.model?.includes("voicedesign") ? "设计音色" : "预置音色"}
-                            </span>
-                            <small>{profile.model || profile.ttsProvider}</small>
-                          </div>
-                          <div className="voice-library-source">
-                            <span>{asset?.sourceFileName || profile.voiceId}</span>
-                            {asset?.consentConfirmed && <small><ShieldCheck size={13} />已确认授权</small>}
-                          </div>
-                          <div className="voice-library-actions">
-                            <button
-                              className="icon-button"
-                              title={`试听 ${profile.name}`}
-                              onClick={() => voices.previewVoiceProfile(profile.id)}
-                              disabled={Boolean(busy)}
-                            >
-                              {busy === "生成音色试听" ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
-                            </button>
-                            <button className="icon-button" title="编辑声音档案" onClick={() => voices.startEditingVoiceProfile(profile)}>
-                              <Pencil size={15} />
-                            </button>
-                            <button
-                              className="icon-button"
-                              title={`删除 ${profile.name}`}
-                              onClick={() => voices.deleteVoiceProfile(profile)}
-                              disabled={Boolean(busy)}
-                            >
-                              <Trash2 size={15} />
-                            </button>
-                          </div>
-                        </article>
-                        {editing && <VoiceEditor profile={profile} voices={voices} />}
+                  {orderedGroups.map(([characterId, group]) => (
+                    <div className="voice-group" key={characterId || "__narrator"}>
+                      <div className="voice-group-head">
+                        <strong>{characterName(characterId || undefined)}</strong>
+                        <span>
+                          {group.length > 1 ? `${group.length} 个年龄阶段档位` : "1 个音色"}
+                        </span>
+                        {group.some((profile) => profile.isDefault) && (
+                          <span className="voice-default-badge" title="系统自动兜底的音色，还没有人确认过">
+                            {text.defaultUnconfirmed}
+                          </span>
+                        )}
+                        {characterId && (
+                          <button
+                            className="ghost compact"
+                            onClick={() => onDesignVoice(characterId, characterName(characterId))}
+                          >
+                            {text.designVoice}
+                          </button>
+                        )}
                       </div>
-                    );
-                  })}
-                  {!profiles.length && <div className="voice-library-empty">当前项目还没有声音档案</div>}
+                      {group.map((profile) => {
+                        const asset = profile.voiceAssetId ? assetById.get(profile.voiceAssetId) : undefined;
+                        const editing = voices.editingVoiceProfileId === profile.id;
+                        return (
+                          <div className="voice-library-entry" key={profile.id}>
+                            <article className="voice-library-row">
+                              <div className="voice-library-icon"><Mic2 size={17} /></div>
+                              <div className="voice-library-main">
+                                <strong>{profile.name}</strong>
+                                <span>{ageStageLabels[profile.ageStage] ?? profile.ageStage}</span>
+                              </div>
+                              <div className="voice-library-meta">
+                                <span className={`voice-kind ${asset ? "clone" : ""}`}>
+                                  {asset ? "克隆音色" : profile.model?.includes("voicedesign") ? "设计音色" : "预置音色"}
+                                </span>
+                                <small>{profile.model || profile.ttsProvider}</small>
+                              </div>
+                              <div className="voice-library-source">
+                                <span>{asset?.sourceFileName || profile.voiceId}</span>
+                                {asset?.consentConfirmed && <small><ShieldCheck size={13} />已确认授权</small>}
+                              </div>
+                              <div className="voice-library-actions">
+                                <button
+                                  className="icon-button"
+                                  title={`试听 ${profile.name}`}
+                                  onClick={() => voices.previewVoiceProfile(profile.id)}
+                                  disabled={Boolean(busy)}
+                                >
+                                  {busy === "生成音色试听" ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
+                                </button>
+                                <button className="icon-button" title="编辑音色档案" onClick={() => voices.startEditingVoiceProfile(profile)}>
+                                  <Pencil size={15} />
+                                </button>
+                                <button
+                                  className="icon-button"
+                                  title={`删除 ${profile.name}`}
+                                  onClick={() => voices.deleteVoiceProfile(profile)}
+                                  disabled={Boolean(busy)}
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            </article>
+                            {editing && <VoiceEditor profile={profile} voices={voices} />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  {!profiles.length && <div className="voice-library-empty">当前项目还没有音色档案</div>}
                 </div>
                 {voices.voicePreviewPath && (
                   <div className="voice-preview">

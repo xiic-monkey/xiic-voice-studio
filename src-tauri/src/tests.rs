@@ -1421,6 +1421,91 @@ mod tests {
         .unwrap()
     }
 
+    /// 回归：改角色音色不得把分段引用清空。
+    ///
+    /// 旧实现 `UPDATE segments SET voice_profile_id = NULL WHERE character_id=? AND audio_status='missing'`
+    /// 会让这些分段在合成时 JOIN 不到音色档案 → 被 `COALESCE(v.tts_provider,'mock')` 兜底成 mock
+    /// → 整批生成撞上「供应商不一致」报错。这是当时那 26 个 mock 分段的机制性来源。
+    #[test]
+    fn changing_character_voice_keeps_segments_resolvable() {
+        let root = std::env::temp_dir().join(format!("xiic-test-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "改音色回归测试", None).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(&source_path, "张三：你好。\n旁白继续。").unwrap();
+        let source = importer::read_source(&source_path).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let chapter_ids = importer::import_source(&conn, &summary.manifest.id, &source).unwrap();
+        importer::seed_segments_from_chapter(&conn, &chapter_ids[0], false).unwrap();
+        ai::extract_characters(&conn, &summary.manifest.id).unwrap();
+        let character_id = character_id_by_name(&conn, "张三");
+
+        let default_profile_id: String = conn
+            .query_row(
+                "SELECT id FROM voice_profiles WHERE character_id = ?1 AND is_default = 1",
+                [&character_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tts::validate_voice_resolution(&conn, &summary.manifest.id, Vec::new()).unwrap();
+
+        crate::apply_character_voice(&conn, &character_id, "Milo", "mimo", None, None, None).unwrap();
+
+        // 分段不再持有可独立演化的副本（未定稿时 voice_profile_id 本就为 NULL），
+        // 关键是它们仍然能解析到音色——旧 bug 就是解析不到而被兜底成 mock。
+        tts::validate_voice_resolution(&conn, &summary.manifest.id, Vec::new()).unwrap();
+        let resolved_profile = tts::preferred_voice_profile_for_character(&conn, &character_id)
+            .unwrap()
+            .expect("角色应当有可解析的音色");
+        let resolved_voice_id: String = conn
+            .query_row(
+                "SELECT voice_id FROM voice_profiles WHERE id = ?1",
+                [&resolved_profile],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let is_default: i64 = conn
+            .query_row(
+                "SELECT is_default FROM voice_profiles WHERE id = ?1",
+                [&default_profile_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(resolved_voice_id, "Milo", "改完音色后解析到的应当是新的音色");
+        assert_eq!(
+            resolved_profile, default_profile_id,
+            "改音色应就地更新原有档案，而不是新开一条留下孤儿"
+        );
+        assert_eq!(is_default, 0, "人定过的音色不再是默认档");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 生成前的音色闸门：说话人没有音色时必须报错并指出是谁，而不是静默兜底成 mock。
+    #[test]
+    fn generation_is_blocked_when_a_speaker_has_no_voice() {
+        let root = std::env::temp_dir().join(format!("xiic-test-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "音色闸门测试", None).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(&source_path, "张三：你好。\n旁白继续。").unwrap();
+        let source = importer::read_source(&source_path).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let chapter_ids = importer::import_source(&conn, &summary.manifest.id, &source).unwrap();
+        importer::seed_segments_from_chapter(&conn, &chapter_ids[0], false).unwrap();
+        ai::extract_characters(&conn, &summary.manifest.id).unwrap();
+
+        tts::validate_voice_resolution(&conn, &summary.manifest.id, Vec::new()).unwrap();
+
+        conn.execute("DELETE FROM voice_profiles", []).unwrap();
+        let error = tts::validate_voice_resolution(&conn, &summary.manifest.id, Vec::new())
+            .expect_err("说话人没有音色时应当报错");
+        let message = error.to_string();
+        assert!(message.contains("张三"), "报错应指明缺音色的角色：{message}");
+        assert!(message.contains("旁白"), "报错应指明旁白：{message}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn insert_character_voice(
         conn: &rusqlite::Connection,
         project_id: &str,
@@ -1557,5 +1642,892 @@ mod tests {
         assert_eq!(assigned, 1);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /* ---------- 音色描述的章节上下文 ---------- */
+
+    fn context_segment(character_id: Option<&str>, text: &str, segment_type: &str) -> crate::domain::Segment {
+        crate::domain::Segment {
+            id: Uuid::new_v4().to_string(),
+            chapter_id: "chapter-1".to_string(),
+            scene_id: None,
+            order_index: 0,
+            text: text.to_string(),
+            segment_type: crate::domain::SegmentType::from(segment_type),
+            speaker: None,
+            character_id: character_id.map(str::to_string),
+            emotion: None,
+            sound_cue: None,
+            anchor: None,
+            voice_profile_id: None,
+            audio_status: "missing".to_string(),
+            review_status: "unreviewed".to_string(),
+            age_progress: None,
+            is_manual_edit: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 引号内的对白与引号外的叙述必须分开——旧 bug 就是把整段原文当"台词样本"，
+    /// LLM 原样抄回来，用户看到的"音色描述"其实是章节原文。
+    #[test]
+    fn voice_context_splits_quoted_lines_from_narration() {
+        let raw = "“萧炎，斗之力，三段！级别：低级！”测验魔石碑之旁，一位中年男子，看了一眼碑上所显示出来的信息，语气漠然的将之公布了出来…";
+        let (quotes, rest) = crate::voice_context::split_quotes(raw);
+        assert_eq!(quotes, vec!["萧炎，斗之力，三段！级别：低级！".to_string()]);
+        assert!(rest.contains("语气漠然"));
+        assert!(!rest.contains('“'));
+    }
+
+    #[test]
+    fn voice_context_draft_uses_evidence_not_raw_text() {
+        let raw = "“萧炎，斗之力，三段！级别：低级！”测验魔石碑之旁，一位中年男子，看了一眼碑上所显示出来的信息，语气漠然的将之公布了出来…";
+        let segments = vec![
+            context_segment(Some("char-1"), raw, "dialogue"),
+            context_segment(
+                None,
+                "中年男子话刚刚脱口，便是不出意外的在人头汹涌的广场上带起了一阵嘲讽的骚动。",
+                "narration",
+            ),
+        ];
+        let context = crate::voice_context::assemble("char-1", "中年男子", &[], &segments);
+        assert_eq!(context.line_count(), 1);
+        assert!(
+            context.narration().iter().any(|item| item.contains("语气漠然")),
+            "引号外的叙述应当作为人物气质线索保留"
+        );
+        assert!(
+            context.narration().iter().any(|item| item.contains("骚动")),
+            "提到该角色的其它叙述也应进入上下文"
+        );
+
+        let draft = crate::voice_context::compose_draft(
+            "中年男子",
+            &[],
+            None,
+            None,
+            None,
+            &context,
+        );
+        assert!(draft.contains("中年男性"), "应当从上下文推断出年龄段与性别：{draft}");
+        assert!(draft.contains("漠然"), "应当引用语气线索：{draft}");
+        assert!(
+            !draft.contains("测验魔石碑"),
+            "草稿不能照抄章节原文：{draft}"
+        );
+    }
+
+    /// 回归：**不能拿角色自己的台词推性别**。
+    ///
+    /// 真实数据里「中年男子」的台词提到的是别人（「薰儿小姐…」「对着少女略微恭声道」），
+    /// 旧实现把这些词和他的名字一起丢进同一个语料里数词频，
+    /// 结果「女」的命中数压过「男」，草稿写成「中年**女**性角色」——音色直接选错。
+    #[test]
+    fn gender_comes_from_identity_evidence_not_from_spoken_lines() {
+        let segments = vec![
+            context_segment(
+                Some("char-1"),
+                "“斗之力，三段！”",
+                "dialogue",
+            ),
+            context_segment(
+                Some("char-1"),
+                "“薰儿小姐，半年之后，你应该便能凝聚斗气之旋。”",
+                "dialogue",
+            ),
+            context_segment(
+                Some("char-1"),
+                "望着石碑上的信息，一旁的中年测验员漠然的脸庞上竟然也是罕见的露出了一丝笑意，对着少女略微恭声道：",
+                "dialogue",
+            ),
+        ];
+        let context = crate::voice_context::assemble("char-1", "中年男子", &[], &segments);
+        let draft = crate::voice_context::compose_draft(
+            "中年男子",
+            &[],
+            None,
+            Some("adult"), // AI 标注阶段写下的占位值，不能压过名字里的「中年」
+            None,
+            &context,
+        );
+        assert!(
+            draft.contains("中年男性角色"),
+            "名字自述应当压过台词里提到的女性称谓：{draft}"
+        );
+        assert!(
+            !draft.contains("女性") && !draft.contains("adult"),
+            "既不能判成女性，也不能把内部 token 打出来：{draft}"
+        );
+    }
+
+    /// 人标注的性别/年龄阶段必须归一成中文，且优先于文本推断。
+    #[test]
+    fn stated_gender_and_age_stage_are_normalized_and_take_priority() {
+        assert_eq!(
+            crate::voice_context::normalize_gender("female").as_deref(),
+            Some("女")
+        );
+        assert_eq!(
+            crate::voice_context::normalize_gender("male").as_deref(),
+            Some("男"),
+            "female 含 male 子串，必须整串比较"
+        );
+        assert_eq!(crate::voice_context::age_stage_label("middle_aged").as_deref(), Some("中年"));
+        assert_eq!(
+            crate::voice_context::age_stage_label("中年").as_deref(),
+            Some("中年"),
+            "自由文本框里手写的中文也应当认得"
+        );
+        assert_eq!(crate::voice_context::age_stage_label("adult").as_deref(), Some("成年"));
+        assert!(
+            crate::voice_context::is_placeholder_age_stage("adult"),
+            "导入阶段统一写下的 adult 是占位值，排序时要让位于文本证据"
+        );
+        assert!(!crate::voice_context::is_placeholder_age_stage("middle_aged"));
+
+        let segments = vec![context_segment(
+            None,
+            "少女微微点了点头，柔软的嗓音在广场上散开。",
+            "narration",
+        )];
+        let context = crate::voice_context::assemble("char-1", "萧薰儿", &[], &segments);
+        let draft = crate::voice_context::compose_draft(
+            "萧薰儿",
+            &[],
+            Some("female"),
+            None,
+            None,
+            &context,
+        );
+        assert!(draft.contains("女性角色"), "人标注的性别优先：{draft}");
+    }
+
+    /// 一段叙述里同时写到多个人时，词频无法判断哪个词说的是谁——
+    /// 这时必须**拒绝下结论**，而不是挑词频高的那个。
+    ///
+    /// 真实数据：萧炎的叙述里有「面对着少女毫不掩饰的坦率话语，少年尴尬的笑了一声」，
+    /// 也有「少女顿下了脚步，对着萧炎恭敬的弯了弯腰」。
+    /// 「少女」与「少年」都紧挨着名字，谁分高全靠词表顺序，写成「少年女性角色」音色就选错了。
+    #[test]
+    fn conflicting_gender_cues_yield_no_claim() {
+        let segments = vec![
+            context_segment(
+                Some("char-1"),
+                "“我现在还有资格让你怎么叫么?”",
+                "dialogue",
+            ),
+            context_segment(
+                None,
+                "面对着少女毫不掩饰的坦率话语，少年尴尬的笑了一声，落寞的回转过身。",
+                "narration",
+            ),
+        ];
+        let context = crate::voice_context::assemble("char-1", "萧炎", &[], &segments);
+        let draft = crate::voice_context::compose_draft("萧炎", &[], None, None, None, &context);
+        assert!(
+            !draft.contains("女性") && !draft.contains("男性"),
+            "证据冲突时不能给出性别：{draft}"
+        );
+        assert!(
+            draft.contains("未能确定性别"),
+            "不确定就要说明，让用户先确认再合成：{draft}"
+        );
+    }
+
+    /// 占位年龄阶段兜底时必须声明"这是默认值"。
+    ///
+    /// 真实数据：萧炎的叙述里有「少年」（他自己）也有「一位中年男子」（旁人），
+    /// 年龄线索冲突 → 只能退回导入时写下的占位值 `adult` → 成年。
+    /// 这个成年不是从文里读出来的，草稿必须讲明白，否则用户会以为已经确认过。
+    #[test]
+    fn placeholder_age_stage_fallback_is_disclosed() {
+        let segments = vec![
+            context_segment(Some("char-1"), "“我现在还有资格让你怎么叫么?”", "dialogue"),
+            context_segment(
+                None,
+                "测验魔石碑之旁，一位中年男子漠然的将信息公布了出来。",
+                "narration",
+            ),
+            context_segment(
+                None,
+                "面对着少女毫不掩饰的坦率话语，少年尴尬的笑了一声。",
+                "narration",
+            ),
+        ];
+        let context = crate::voice_context::assemble("char-1", "萧炎", &[], &segments);
+        let draft =
+            crate::voice_context::compose_draft("萧炎", &[], None, Some("adult"), None, &context);
+        assert!(draft.contains("成年"), "占位值仍可使用：{draft}");
+        assert!(
+            draft.contains("年龄阶段按默认值处理"),
+            "兜底出来的年龄必须声明是默认值：{draft}"
+        );
+        assert!(
+            !draft.contains("成年男性") && !draft.contains("成年女性"),
+            "线索冲突时不能给性别：{draft}"
+        );
+    }
+
+    /// 名字/别名自述压过叙述里的杂音：名字里有「男子」就是男性，
+    /// 哪怕叙述里同时出现了「少女」。
+    #[test]
+    fn name_self_description_outweighs_noisy_narration() {
+        let segments = vec![
+            context_segment(
+                Some("char-1"),
+                "“下一个，萧媚！”",
+                "dialogue",
+            ),
+            context_segment(
+                None,
+                "测验魔石碑之旁，一位中年男子漠然开口，随后对着广场另一侧的少女略微恭声说了几句。",
+                "narration",
+            ),
+        ];
+        let context = crate::voice_context::assemble("char-1", "中年男子", &[], &segments);
+        let draft = crate::voice_context::compose_draft("中年男子", &[], None, None, None, &context);
+        assert!(draft.contains("中年男性角色"), "名字自述最可靠：{draft}");
+        assert!(!draft.contains("女性"), "不能被叙述里的「少女」带偏：{draft}");
+    }
+
+    /// LLM 把章节原文抄回来时必须被判为不合格，从而触发严格重试或回退草稿。
+    #[test]
+    fn voice_description_validation_rejects_echoed_chapter_text() {
+        let lines = vec!["萧炎，斗之力，三段！级别：低级！".to_string()];
+        assert!(ai::invalid_voice_description_reason(
+            "“萧炎，斗之力，三段！级别：低级！”测验魔石碑之旁，一位中年男子。",
+            &lines
+        )
+        .is_some());
+        assert!(ai::invalid_voice_description_reason(&lines[0], &lines).is_some());
+        assert!(ai::invalid_voice_description_reason("中年男性，中低音色，语气漠然克制，语速平稳偏慢。", &lines)
+            .is_none());
+    }
+
+    /// 回归：拆分分段时人工填的情绪要跟着拆，别每拆一次就丢一次。
+    /// （`split_segment_at` 曾在 INSERT 里把 emotion 写死成 NULL。）
+    #[test]
+    fn splitting_a_segment_keeps_the_emotion_for_both_halves() {
+        let root = std::env::temp_dir().join(format!("xiic-split-emotion-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(&source_path, "张三: 斗之力，三段！级别：低级！").unwrap();
+        let source = importer::read_source(&source_path).unwrap();
+        let summary = storage::create_project(&root, "拆分情绪测试", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let chapter_id = importer::import_source(&conn, &summary.manifest.id, &source)
+            .unwrap()
+            .remove(0);
+        importer::seed_segments_from_chapter(&conn, &chapter_id, false).unwrap();
+        let segment_id: String = conn
+            .query_row(
+                "SELECT id FROM segments ORDER BY order_index LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE segments SET emotion = '大声宣布', audio_status = 'generated' WHERE id = ?1",
+            [&segment_id],
+        )
+        .unwrap();
+
+        storage::split_segment_at(&conn, &segment_id, 5).unwrap();
+
+        let rows: Vec<(String, Option<String>, String)> = conn
+            .prepare("SELECT text, emotion, audio_status FROM segments ORDER BY order_index")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (text, emotion, status) in &rows {
+            assert_eq!(
+                emotion.as_deref(),
+                Some("大声宣布"),
+                "拆出来的两半都应保留情绪：{text}"
+            );
+            assert_eq!(status, "missing", "拆分后音频必须失效、等重新生成：{text}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 可空人工字段的归一：空白一律落 NULL，别在库里留下 `''`
+    /// （否则「清空情绪」和「本来就是空」会被算成两次不同的改动，白让音频失效）。
+    #[test]
+    fn blank_optional_text_normalizes_to_none() {
+        assert_eq!(
+            crate::normalize_optional_text(Some("大声宣布")),
+            Some("大声宣布".to_string())
+        );
+        assert_eq!(
+            crate::normalize_optional_text(Some("  大声宣布 ")),
+            Some("大声宣布".to_string())
+        );
+        assert_eq!(crate::normalize_optional_text(Some("")), None);
+        assert_eq!(crate::normalize_optional_text(Some("   ")), None);
+        assert_eq!(crate::normalize_optional_text(None), None);
+    }
+
+    /// 自动失效提示：同一分段同一类型只允许一条，且重新生成后必须消失。
+    ///
+    /// 症状回归：每「改一次 → 重新生成一次」就多插一条 `script_changed`，
+    /// 界面上堆成一串同名的「脚本内容已变更」（实测某分段累积 4 条、横跨 16 天），
+    /// 而重新生成那条提示要求的动作之后，它自己却还挂着。
+    #[test]
+    fn auto_invalidation_keeps_one_open_issue_and_regeneration_closes_it() {
+        let root = std::env::temp_dir().join(format!("xiic-issue-test-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "失效提示测试", None).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(&source_path, "旁白继续。").unwrap();
+        let source = importer::read_source(&source_path).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let chapter_id = importer::import_source(&conn, &summary.manifest.id, &source)
+            .unwrap()
+            .remove(0);
+        importer::seed_segments_from_chapter(&conn, &chapter_id, false).unwrap();
+        let segment_id: String = conn
+            .query_row("SELECT id FROM segments LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+
+        let count_open = |issue_type: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM review_issues
+                 WHERE segment_id = ?1 AND issue_type = ?2 AND status = 'open'",
+                params![segment_id, issue_type],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        tts::synthesize_segments(
+            &conn,
+            &root,
+            &summary.manifest.id,
+            vec![segment_id.clone()],
+            None,
+        )
+        .unwrap();
+
+        // 三轮「改了脚本/音色 → 重新生成」，每轮都必须回到干净状态
+        for reason in ["脚本内容已变更", "角色音色已固化", "声音配置已变更"] {
+            audio::invalidate_segment_audio(&conn, &segment_id, reason).unwrap();
+            assert_eq!(
+                count_open("script_changed"),
+                1,
+                "失效后应有且仅有一条 open 提示（不能累加）：{reason}"
+            );
+            tts::synthesize_segments_with_options(
+                &conn,
+                &root,
+                &summary.manifest.id,
+                vec![segment_id.clone()],
+                None,
+                tts::TtsSynthesisOptions {
+                    force_regenerate: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                count_open("script_changed"),
+                0,
+                "音频已按当前脚本重新生成，提示必须消失：{reason}"
+            );
+        }
+
+        // 人工审听意见是人的判断，不能被"重新生成"顺手抹掉
+        audio::create_review_issue(
+            &conn,
+            Some(segment_id.clone()),
+            None,
+            "human_note".to_string(),
+            "第 3 句停顿太长".to_string(),
+        )
+        .unwrap();
+        audio::invalidate_segment_audio(&conn, &segment_id, "脚本内容已变更").unwrap();
+        tts::synthesize_segments_with_options(
+            &conn,
+            &root,
+            &summary.manifest.id,
+            vec![segment_id.clone()],
+            None,
+            tts::TtsSynthesisOptions {
+                force_regenerate: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(count_open("script_changed"), 0, "自动提示应被关闭");
+        assert_eq!(
+            count_open("human_note"),
+            1,
+            "人工审听意见必须保留，只能由人确认关闭"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_character_creation_blocks_duplicate_names_and_alias_collisions() {
+        let root = std::env::temp_dir().join(format!("xiic-test-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "手动建角色测试", None).unwrap();
+        let project_id = summary.manifest.id.clone();
+        let mut conn = storage::open_connection(&root).unwrap();
+
+        // 名字两端空白要 trim；别名里与本体同名或相互重复的都要丢掉
+        let id = storage::create_character(
+            &mut conn,
+            &project_id,
+            "  药老 ",
+            &[
+                "药尘".to_string(),
+                "药老".to_string(),
+                "药尘".to_string(),
+            ],
+            Some("male"),
+            Some("老年"),
+            None,
+        )
+        .unwrap();
+        let (name, color): (String, String) = conn
+            .query_row(
+                "SELECT canonical_name, default_color FROM characters WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "药老");
+        assert_eq!(color, ai::pick_character_color("药老"));
+        let aliases: Vec<String> = conn
+            .prepare("SELECT alias FROM character_aliases WHERE character_id = ?1")
+            .unwrap()
+            .query_map(params![id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(aliases, vec!["药尘".to_string()]);
+
+        // 命令层的收尾动作：新建后必须补一条默认音色档，
+        // 否则这个角色一进合成就撞上「没有音色」的闸门。
+        tts::ensure_default_voice_profiles(&conn, &project_id).unwrap();
+        let default_profiles: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM voice_profiles WHERE character_id = ?1 AND is_default = 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_profiles, 1);
+
+        // 重名：界面里出现两个无从分辨的同名角色，归属会立刻烂掉
+        let duplicate =
+            storage::create_character(&mut conn, &project_id, "药老", &[], None, None, None)
+                .unwrap_err()
+                .to_string();
+        assert!(duplicate.contains("已经有叫「药老」的角色"), "{duplicate}");
+
+        // 别名撞车：既包括撞上已有角色的**名字**，也包括撞上它的**别名**。
+        // 别名共用 = 分段会被并到错的人名下，必须挡住。
+        for alias in ["药老", "药尘"] {
+            let clash = storage::create_character(
+                &mut conn,
+                &project_id,
+                "萧炎",
+                &[alias.to_string()],
+                None,
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(clash.contains(alias), "{clash}");
+        }
+        assert!(
+            storage::create_character(
+                &mut conn,
+                &project_id,
+                "萧炎",
+                &["炎帝".to_string()],
+                None,
+                None,
+                None,
+            )
+            .is_ok(),
+            "不冲突的别名应该放行"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 卡片上的「试听固化样本」按钮完全依赖这个函数：
+    /// 它必须把"文件被外部删了"如实报成 None，否则前端会拿一个播不响的路径
+    /// 去喂播放器 —— 用户点了没声音、也没有任何提示。
+    #[test]
+    fn voice_asset_audio_path_only_returns_paths_that_exist() {
+        let root = std::env::temp_dir().join(format!("xiic-voice-asset-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "音色样本路径", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let asset_id = Uuid::new_v4().to_string();
+        let relative_path = format!("assets/source/voices/{asset_id}.wav");
+        let timestamp = storage::now();
+        conn.execute(
+            "INSERT INTO voice_assets
+             (id, project_id, name, asset_type, provider, model, relative_path, mime_type,
+              source_file_name, consent_confirmed, status, created_at, updated_at)
+             VALUES (?1, ?2, '音色样本', 'voice_design_sample', 'mimo', 'mimo-v2.5-tts-voicedesign',
+                     ?3, 'audio/wav', 'design-x', 1, 'ready', ?4, ?5)",
+            params![
+                asset_id,
+                summary.manifest.id,
+                relative_path,
+                timestamp,
+                timestamp
+            ],
+        )
+        .unwrap();
+
+        // 记录在库里、文件还没落盘：只能给 None
+        assert!(storage::voice_asset_audio_path(&conn, &root, &summary.manifest.id, &asset_id)
+            .unwrap()
+            .is_none());
+
+        let destination = root.join(&relative_path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"RIFF").unwrap();
+        assert_eq!(
+            storage::voice_asset_audio_path(&conn, &root, &summary.manifest.id, &asset_id).unwrap(),
+            Some(destination.to_string_lossy().to_string())
+        );
+
+        // 文件删掉之后必须重新变回 None（不能只信库里的记录）
+        fs::remove_file(&destination).unwrap();
+        assert!(storage::voice_asset_audio_path(&conn, &root, &summary.manifest.id, &asset_id)
+            .unwrap()
+            .is_none());
+
+        // 资产不属于当前项目时也查不到
+        assert!(storage::voice_asset_audio_path(&conn, &root, "other-project", &asset_id)
+            .unwrap()
+            .is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /* ---------- 删除 / 撤销删除 ---------- */
+
+    /// 造一个章节，塞进 `count` 条分段，返回 (chapter_id, 各分段 id)。
+    /// 这些测试关心的是删除链路，所以直接写表，不走导入 + 标注那条长链路。
+    fn seed_chapter(conn: &rusqlite::Connection, project_id: &str, count: i64) -> (String, Vec<String>) {
+        let chapter_id = Uuid::new_v4().to_string();
+        let timestamp = storage::now();
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, title, order_index, raw_text, script_status, created_at, updated_at)
+             VALUES (?1, ?2, '第一章', 0, '原文', 'imported', ?3, ?4)",
+            params![chapter_id, project_id, timestamp, timestamp],
+        )
+        .unwrap();
+
+        let mut ids = Vec::new();
+        for index in 0..count {
+            let id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO segments (id, chapter_id, scene_id, order_index, text, segment_type, speaker, character_id, emotion, sound_cue, anchor, voice_profile_id, audio_status, review_status, age_progress, is_manual_edit, created_at, updated_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, 'dialogue', '萧炎', NULL, ?5, NULL, NULL, NULL, 'ready', 'approved', NULL, 0, ?6, ?7)",
+                params![
+                    id,
+                    chapter_id,
+                    index,
+                    format!("第 {index} 句"),
+                    format!("情绪{index}"),
+                    timestamp,
+                    timestamp
+                ],
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        (chapter_id, ids)
+    }
+
+    /// 删除必须是可撤销的，而且要**原样**撤销：
+    /// 文本、情绪、序号、音频记录、审听备注全都得回来。
+    /// 只恢复文本不算数——用户的音频是花钱生成的。
+    #[test]
+    fn deleting_a_segment_can_be_undone_intact() {
+        let root = std::env::temp_dir().join(format!("xiic-undo-delete-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "撤销删除", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let (chapter_id, ids) = seed_chapter(&conn, &summary.manifest.id, 3);
+        let target = ids[1].clone();
+        let timestamp = storage::now();
+
+        // 给目标分段配一条音频记录 + 一条人工审听备注
+        let audio_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO segment_audio (id, segment_id, relative_path, duration_ms, loudness_lufs, version, source, status, created_at)
+             VALUES (?1, ?2, 'assets/audio/keep-me.wav', 1200, -16.0, 1, 'tts', 'ready', ?3)",
+            params![audio_id, target, timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO review_issues (id, segment_id, audio_id, issue_type, note, status, created_at)
+             VALUES (?1, ?2, ?3, 'human_note', '这里咬字不清', 'open', ?4)",
+            params![Uuid::new_v4().to_string(), target, audio_id, timestamp],
+        )
+        .unwrap();
+
+        let archived = storage::delete_segment(&conn, &summary.manifest.id, &target).unwrap();
+        assert_eq!(archived.position_index, 1);
+        assert_eq!(archived.text_preview, "第 1 句");
+
+        // 活表里三样都得消失（分段本体、音频记录、审听备注）
+        let alive = storage::list_segments(&conn, Some(&chapter_id)).unwrap();
+        assert_eq!(alive.len(), 2, "删除后活分段应只剩两条");
+        assert!(!alive.iter().any(|segment| segment.id == target));
+        let audio_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM segment_audio WHERE segment_id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audio_count, 0, "音频记录应随分段一起离开活表");
+        let issue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_issues WHERE segment_id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(issue_count, 0, "审听备注应随分段一起离开活表");
+
+        let restored = storage::restore_segment(&conn, &target).unwrap();
+        assert_eq!(restored.id, target);
+        assert_eq!(restored.order_index, 1, "必须落回原来的序号");
+        assert_eq!(restored.emotion.as_deref(), Some("情绪1"));
+        assert_eq!(restored.audio_status, "ready", "音频状态不能被重置");
+        assert_eq!(restored.review_status, "approved", "审听结论不能被重置");
+
+        let alive = storage::list_segments(&conn, Some(&chapter_id)).unwrap();
+        assert_eq!(
+            alive.iter().map(|segment| segment.order_index).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "恢复后序号不能被撑出空洞"
+        );
+        assert_eq!(alive[1].id, target);
+        let audio_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM segment_audio WHERE segment_id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audio_count, 1, "音频记录必须回来");
+        let note: String = conn
+            .query_row(
+                "SELECT note FROM review_issues WHERE segment_id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(note, "这里咬字不清", "审听备注必须回来");
+
+        // 归档是一次性的：撤销过一次就不能再撤一遍
+        assert!(storage::restore_segment(&conn, &target).is_err());
+        assert!(storage::list_deleted_segments(&conn, &summary.manifest.id)
+            .unwrap()
+            .is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 归档里引用的角色可能在删除期间被删掉。
+    /// 这时**不能拒绝恢复**——分段文本和音频远比"当时配的哪个角色"重要，
+    /// 失效的引用降级成 NULL 即可。
+    #[test]
+    fn restoring_a_segment_survives_a_deleted_character() {
+        let root = std::env::temp_dir().join(format!("xiic-undo-char-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "撤销遇角色被删", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let (_, ids) = seed_chapter(&conn, &summary.manifest.id, 2);
+        let target = ids[0].clone();
+
+        let character_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO characters (id, project_id, canonical_name, gender, age_timeline, notes, default_color)
+             VALUES (?1, ?2, '萧炎', NULL, NULL, NULL, '#276ef1')",
+            params![character_id, summary.manifest.id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE segments SET character_id = ?1 WHERE id = ?2",
+            params![character_id, target],
+        )
+        .unwrap();
+
+        storage::delete_segment(&conn, &summary.manifest.id, &target).unwrap();
+        // 归档之后角色没了
+        conn.execute("DELETE FROM characters WHERE id = ?1", params![character_id])
+            .unwrap();
+
+        let restored = storage::restore_segment(&conn, &target).unwrap();
+        assert_eq!(restored.text, "第 0 句", "文本必须完整回来");
+        assert_eq!(
+            restored.character_id, None,
+            "角色已不存在，引用要降级成 NULL 而不是让整条恢复失败"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 原序号在这期间被别人占了（用户删完又插了新句），
+    /// 恢复时要让位——把 >= 该序号的整段后移，而不是覆盖或报错。
+    #[test]
+    fn restoring_a_segment_makes_room_when_the_slot_is_taken() {
+        let root = std::env::temp_dir().join(format!("xiic-undo-slot-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "撤销让位", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let (chapter_id, ids) = seed_chapter(&conn, &summary.manifest.id, 3);
+        let target = ids[1].clone();
+
+        storage::delete_segment(&conn, &summary.manifest.id, &target).unwrap();
+        // 在序号 1 插一句新的，占掉刚空出来的位置
+        storage::insert_segment_after(
+            &conn,
+            &chapter_id,
+            Some(ids[0].as_str()),
+            "插进来的新句",
+            crate::domain::SegmentType::Dialogue,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let restored = storage::restore_segment(&conn, &target).unwrap();
+        assert_eq!(restored.order_index, 1, "恢复的段落回原序号");
+        let alive = storage::list_segments(&conn, Some(&chapter_id)).unwrap();
+        assert_eq!(
+            alive.iter().map(|segment| segment.order_index).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "被占位时整段后移，序号仍连续"
+        );
+        assert_eq!(alive[1].id, target);
+        assert_eq!(alive[2].text, "插进来的新句", "新句让位到后一格");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 归档不是永久的：超过保留期才真正清理，
+    /// 并且要把**磁盘上的音频路径**交出来，让调用方删文件。
+    /// 不返回路径 = 归档清了但音频文件永远变成孤儿。
+    #[test]
+    fn expired_archives_are_purged_with_their_audio_paths() {
+        let root = std::env::temp_dir().join(format!("xiic-undo-purge-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "归档清理", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let (_, ids) = seed_chapter(&conn, &summary.manifest.id, 2);
+        let target = ids[0].clone();
+        conn.execute(
+            "INSERT INTO segment_audio (id, segment_id, relative_path, duration_ms, loudness_lufs, version, source, status, created_at)
+             VALUES (?1, ?2, 'assets/audio/gone.wav', 900, -18.0, 1, 'tts', 'ready', ?3)",
+            params![Uuid::new_v4().to_string(), target, storage::now()],
+        )
+        .unwrap();
+
+        storage::delete_segment(&conn, &summary.manifest.id, &target).unwrap();
+
+        // 保留期内的不能被清掉
+        assert!(storage::purge_expired_deleted_segments(&conn, 7).unwrap().is_empty());
+        assert_eq!(
+            storage::list_deleted_segments(&conn, &summary.manifest.id).unwrap().len(),
+            1
+        );
+
+        // 把删除时间挪到 30 天前，再清
+        conn.execute(
+            "UPDATE deleted_segments SET deleted_at = ?1 WHERE id = ?2",
+            params![
+                (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+                target
+            ],
+        )
+        .unwrap();
+
+        let paths = storage::purge_expired_deleted_segments(&conn, 7).unwrap();
+        assert_eq!(paths, vec!["assets/audio/gone.wav".to_string()]);
+        assert!(
+            storage::list_deleted_segments(&conn, &summary.manifest.id)
+                .unwrap()
+                .is_empty(),
+            "超期归档应被清掉"
+        );
+        // 清了之后连撤销也做不了（归档已不存在）
+        assert!(storage::restore_segment(&conn, &target).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 空章节的「添加第一句」：没有"上一段"可指，必须能插到章首。
+    /// 这条路径以前不存在——章里的分段被删光后，界面上根本没有入口再加回来。
+    #[test]
+    fn inserting_a_segment_into_an_empty_chapter_lands_first() {
+        let root = std::env::temp_dir().join(format!("xiic-insert-empty-{}", Uuid::new_v4()));
+        let summary = storage::create_project(&root, "空章节插入", None).unwrap();
+        let conn = storage::open_connection(&root).unwrap();
+        let (chapter_id, _) = seed_chapter(&conn, &summary.manifest.id, 0);
+
+        storage::insert_segment_after(
+            &conn,
+            &chapter_id,
+            None,
+            "第一句",
+            crate::domain::SegmentType::Narration,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let alive = storage::list_segments(&conn, Some(&chapter_id)).unwrap();
+        assert_eq!(alive.len(), 1);
+        assert_eq!(alive[0].order_index, 0);
+        assert_eq!(alive[0].text, "第一句");
+
+        // 已有分段时插章首，旧的整段后移
+        storage::insert_segment_after(
+            &conn,
+            &chapter_id,
+            None,
+            "插到最前面",
+            crate::domain::SegmentType::Narration,
+            None,
+            None,
+        )
+        .unwrap();
+        let alive = storage::list_segments(&conn, Some(&chapter_id)).unwrap();
+        assert_eq!(
+            alive.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>(),
+            vec!["插到最前面", "第一句"]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 空章节的「添加第一句」不会传 `afterSegmentId` 这个字段。
+    /// 参数从必填改成可选后，反序列化是最脆的一环：缺字段必须落成 None，
+    /// 而不是抛 "missing field" —— 那会表现成"点了添加没反应"。
+    #[test]
+    fn insert_request_tolerates_a_missing_after_segment_id() {
+        let request: crate::InsertSegmentRequest =
+            serde_json::from_str(r#"{"chapterId":"c1","text":"第一句","segmentType":"narration"}"#)
+                .unwrap();
+        assert_eq!(request.chapter_id, "c1");
+        assert_eq!(request.after_segment_id, None, "缺字段应落成 None");
+
+        let request: crate::InsertSegmentRequest = serde_json::from_str(
+            r#"{"chapterId":"c1","afterSegmentId":"s9","text":"补一句","segmentType":"dialogue"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.after_segment_id.as_deref(), Some("s9"), "给了位置就照用");
     }
 }

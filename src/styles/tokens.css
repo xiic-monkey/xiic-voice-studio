@@ -105,6 +105,7 @@
   --duration: 160ms;
 
   /* ---- 控件高度 ---- */
+  --control-h-xs: 24px; /* 密集行内图标按钮（分段行操作列塞 7 枚时用） */
   --control-h-sm: 28px;
   --control-h: 32px;
   --control-h-md: 36px;

@@ -51,7 +51,7 @@ pub struct Scene {
     pub mood: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentType {
     Narration,
@@ -114,6 +114,21 @@ pub struct Segment {
     pub updated_at: String,
 }
 
+/// 已删除分段的归档条目（供撤销 / "最近删除"列表）。
+/// 只暴露列表需要的字段；完整的原行数据留在 payload 里，恢复时反序列化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedSegment {
+    pub id: String,
+    /// 该分段所属项目，用来做项目级隔离。
+    pub project_id: String,
+    pub chapter_id: String,
+    /// 删除时占的序号（0 基）。恢复时按它插回原位。
+    pub position_index: i64,
+    pub text_preview: String,
+    pub deleted_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Character {
@@ -142,6 +157,8 @@ pub struct VoiceProfile {
     pub speed: f64,
     pub pitch: f64,
     pub style: Option<String>,
+    /// 系统自动兜底的默认音色（尚未由人确认）。用户一旦设定音色即变为 false。
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,8 +257,15 @@ pub struct StudioSnapshot {
     pub characters: Vec<Character>,
     pub voice_profiles: Vec<VoiceProfile>,
     pub voice_assets: Vec<VoiceAsset>,
+    /// 项目旁白音色的档案 id。由后端按同一口径给出，
+    /// 避免前端从列表里按顺序猜——猜错就会出现"改了旁白音色界面不变"。
+    pub narrator_profile_id: Option<String>,
     pub review_issues: Vec<ReviewIssue>,
     pub jobs: Vec<StudioJob>,
+    /// 已删除、但仍可撤销的分段（超过保留期才会被清理）。
+    /// 放进快照而不是只在删除响应里带一条：刷新页面或重启后，
+    /// toast 早就没了，用户仍然需要一个能把误删找回来的地方。
+    pub deleted_segments: Vec<DeletedSegment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { HelpCircle } from "lucide-react";
 import { displayStatus } from "../utils";
 import type { CheckState } from "../types";
 
@@ -80,4 +81,22 @@ export function SettingsField({
 
 export function EmptyState({ children }: { children: ReactNode }) {
   return <div className="empty-state">{children}</div>;
+}
+
+/**
+ * 常驻说明文字的替代品：一枚「?」图标，hover / 键盘聚焦时才展开气泡。
+ * 卡片里长期挂一行小字会白白抬高行高、也容易变成谁都不读的废话，
+ * 说明性内容应该按需出现，而不是占用版面。
+ */
+export function HintTip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="hint-tip">
+      <button type="button" className="hint-tip-trigger" aria-label={label}>
+        <HelpCircle size={12} />
+      </button>
+      <span className="hint-tip-bubble" role="tooltip">
+        {children}
+      </span>
+    </span>
+  );
 }

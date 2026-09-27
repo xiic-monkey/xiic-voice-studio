@@ -987,6 +987,8 @@ pub fn upload_segment_audio(
         "UPDATE segments SET audio_status = 'uploaded', review_status = 'unreviewed', updated_at = ?1 WHERE id = ?2",
         params![now(), segment_id],
     )?;
+    // 新音频就是按当前脚本/音色产出的，之前的「脚本已变更」提示不再成立。
+    resolve_auto_invalidation_issues(conn, segment_id)?;
     Ok(())
 }
 
@@ -1040,6 +1042,8 @@ pub fn save_segment_recording(
         "UPDATE segments SET audio_status = 'uploaded', review_status = 'unreviewed', updated_at = ?1 WHERE id = ?2",
         params![now(), segment_id],
     )?;
+    // 新音频就是按当前脚本/音色产出的，之前的「脚本已变更」提示不再成立。
+    resolve_auto_invalidation_issues(conn, segment_id)?;
     Ok(())
 }
 
@@ -1082,6 +1086,23 @@ pub fn set_latest_segment_audio_status(
     Ok(())
 }
 
+/// 关闭该分段所有"自动失效"提示（目前只有 `script_changed`）。
+///
+/// 这类提示的字面含义是「当前音频是按旧脚本/旧音色生成的」，所以：
+/// - **写入新音频时必须关掉**（重新生成 / 人工上传 / 应用内录音都算）——原因已消除；
+/// - **重新标记失效前也先关掉**——旧的失效原因已被本次取代，不该两条并存。
+///
+/// 只认 `script_changed`：`human_note` 等人工意见必须由人确认，**绝不能**被
+/// "重新生成了一次"顺手抹掉。
+pub fn resolve_auto_invalidation_issues(conn: &Connection, segment_id: &str) -> StudioResult<()> {
+    conn.execute(
+        "UPDATE review_issues SET status = 'resolved'
+         WHERE segment_id = ?1 AND issue_type = 'script_changed' AND status = 'open'",
+        params![segment_id],
+    )?;
+    Ok(())
+}
+
 pub fn invalidate_segment_audio(
     conn: &Connection,
     segment_id: &str,
@@ -1094,6 +1115,9 @@ pub fn invalidate_segment_audio(
         params![segment_id],
     )?;
     if changed > 0 {
+        // 同一分段的自动失效提示只保留最新一条。少了这一步，每改一次脚本/音色就多插一条，
+        // 界面上会堆成一串同名的「脚本内容已变更」（实测某分段累积了 4 条，横跨 16 天）。
+        resolve_auto_invalidation_issues(conn, segment_id)?;
         conn.execute(
             "INSERT INTO review_issues (id, segment_id, audio_id, issue_type, note, status, created_at)
              VALUES (?1, ?2, NULL, 'script_changed', ?3, 'open', ?4)",
@@ -1112,10 +1136,18 @@ pub fn segment_audio_path(
     root: &Path,
     segment_id: &str,
 ) -> StudioResult<Option<String>> {
-    Ok(newest_audio_for_segment(conn, segment_id)?
+    let Some(path) = newest_audio_for_segment(conn, segment_id)?
         .map(|audio| resolve_audio_path(root, &audio.relative_path))
         .transpose()?
-        .map(|path| path.to_string_lossy().to_string()))
+    else {
+        return Ok(None);
+    };
+    // 文件被删掉时别把死路径交给界面：前端只会得到一句莫名其妙的播放失败。
+    // 这里返回 None，界面就能给出「这个分段还没有可播放的音频」这种能行动的提示。
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(path.to_string_lossy().to_string()))
 }
 
 pub fn detect_audio_duration_ms(

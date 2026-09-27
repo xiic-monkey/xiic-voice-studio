@@ -223,13 +223,13 @@ function TtsForm({ settings, busy }: { settings: AppSettingsController; busy: st
         <div className="settings-fields-section">
           <div className="settings-section-heading">
             <strong>连接参数</strong>
-            <span>接口地址和模型</span>
+            <span>接口地址；角色合成按各自音色档案的模型走</span>
           </div>
           <div className="settings-field-grid">
             <SettingsField id="tts-endpoint" label={text.ttsEndpoint}>
               <input id="tts-endpoint" type="url" value={tts.endpoint} onChange={(event) => tts.changeEndpoint(event.target.value)} />
             </SettingsField>
-            <SettingsField id="tts-model" label={text.ttsModel}>
+            <SettingsField id="tts-model" label={text.ttsModel} hint="兜底值；试听固定 voice design、固化固定 voice clone">
               <input id="tts-model" value={tts.model} onChange={(event) => tts.changeModel(event.target.value)} />
             </SettingsField>
           </div>
@@ -237,7 +237,7 @@ function TtsForm({ settings, busy }: { settings: AppSettingsController; busy: st
         <div className="settings-fields-section">
           <div className="settings-section-heading">
             <strong>音色与表现</strong>
-            <span>用于测试和批量生成的默认值</span>
+            <span>仅供「测试 TTS」试用；角色合成读各自的音色档案</span>
           </div>
           <div className="settings-field-grid">
             <SettingsField id="tts-voice" label={text.ttsVoiceId} hint="支持音色 ID 或文字描述" wide>

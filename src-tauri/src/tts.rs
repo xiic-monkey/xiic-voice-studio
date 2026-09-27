@@ -11,12 +11,17 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_MAX_ATTEMPTS: usize = 3;
+/// 响应体读取失败时的整体重发次数（含首次）。见 `send_and_read_body`。
+const PROVIDER_BODY_MAX_ATTEMPTS: usize = 2;
+/// 错误信息里给用户看的供应商名（与 `provider_id()` 的机器名区分开）。
+const PROVIDER_LABEL_MIMO: &str = "Mimo";
+const PROVIDER_LABEL_ALIYUN: &str = "阿里百炼";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,14 +182,13 @@ impl TtsProvider for AliyunBailianProvider {
             }
         });
         let client = provider_http_client()?;
-        let response_text = send_with_retries(|| {
+        let (_, response_text) = send_and_read_body(PROVIDER_LABEL_ALIYUN, &endpoint, &model, || {
             client
                 .post(&endpoint)
                 .bearer_auth(&api_key)
                 .json(&request_body)
                 .send()
-        })?
-        .text()?;
+        })?;
         let payload: serde_json::Value =
             serde_json::from_str(&response_text).unwrap_or_else(|_| json!({}));
         if let Some(audio_base64) = payload.pointer("/output/audio").and_then(|v| v.as_str()) {
@@ -278,23 +282,21 @@ impl TtsProvider for MimoTtsProvider {
         let model =
             normalize_mimo_model(request.model.as_deref().or(self.settings.model.as_deref()));
         let endpoint = mimo_chat_completions_endpoint(self.settings.endpoint.as_deref());
-        let voice_prompt = request
-            .style
-            .as_deref()
-            .map(str::trim)
-            .filter(|style| !style.is_empty())
-            .unwrap_or("自然、清晰、适合有声读物制作");
-        let request_body = mimo_request_body(request, &model, voice_prompt)?;
+        // 闸门：带克隆样本却走非 voiceclone 模型时，`mimo_request_body` 的 voicedesign 分支
+        // 根本不会读 `voice_sample` —— 参考音频被**静默丢弃**，音色会换成"按描述重新设计"的
+        // 另一个声音，而且不报错。这里宁可失败也不出声。
+        ensure_model_matches_voice_sample(request, &model)?;
+        let voice_prompt = build_voice_prompt(request, &model);
+        let request_body = mimo_request_body(request, &model, &voice_prompt)?;
         let client = provider_http_client()?;
-        let response = send_with_retries(|| {
-            client
-                .post(&endpoint)
-                .header("api-key", api_key)
-                .json(&request_body)
-                .send()
-        })?;
-        let status = response.status();
-        let response_text = response.text()?;
+        let (status, response_text) =
+            send_and_read_body(PROVIDER_LABEL_MIMO, &endpoint, &model, || {
+                client
+                    .post(&endpoint)
+                    .header("api-key", api_key)
+                    .json(&request_body)
+                    .send()
+            })?;
         if !status.is_success() {
             return Err(err(format!(
                 "Mimo TTS 请求失败（HTTP {status}）：{response_text}"
@@ -465,9 +467,47 @@ pub fn list_voices(settings: Option<ProviderSettings>) -> StudioResult<Vec<Voice
     provider_from_settings(settings).list_voices()
 }
 
+/// 默认音色档案的兜底：确保旁白档案存在，并为每个还没有音色的角色补一条。
+///
+/// 「每个角色有自己的固定音色」应当是结构上成立的，而不是留给用户填空：
+/// 角色一被标注出来就带上一条可用的默认音色（用户随后换成预置 / 描述设计 / 参考克隆），
+/// 生成前的音色校验因此不会在正常流程里被触发——它只在真正的破损状态下兜底。
 pub fn ensure_default_voice_profiles(conn: &Connection, project_id: &str) -> StudioResult<()> {
     let narrator_profile_id = ensure_default_narrator_profile(conn, project_id)?;
     bind_voice_profile_to_matching_segments(conn, &narrator_profile_id, None, false)?;
+    let characters: Vec<(String, String, Option<String>)> = conn
+        .prepare("SELECT id, canonical_name, gender FROM characters WHERE project_id = ?1 ORDER BY canonical_name")?
+        .query_map(params![project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (character_id, name, gender) in characters {
+        let existing: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM voice_profiles WHERE character_id = ?1",
+            params![character_id],
+            |row| row.get(0),
+        )?;
+        if existing > 0 {
+            continue;
+        }
+        let voice_id = match gender.as_deref() {
+            Some("male") | Some("男") | Some("男性") => "沉稳自然的中年男声，适合长篇有声书",
+            Some("female") | Some("女") | Some("女性") => "温和清晰的成年女声，适合长篇有声书",
+            _ => "自然清晰、中性的成年声音，适合长篇有声书",
+        };
+        conn.execute(
+            "INSERT INTO voice_profiles
+             (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style, is_default)
+             VALUES (?1, ?2, ?3, ?4, 'adult', 'mimo', 'mimo-v2.5-tts-voicedesign', ?5, 1.0, 0.0, NULL, 1)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                character_id,
+                format!("{name} 声音"),
+                voice_id
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -641,16 +681,69 @@ pub fn segment_ids_matching_voice_scope(
     Ok(rows)
 }
 
-pub fn preferred_voice_profile_for_character(
+/// product-brief 第 6 节的音色时间轴阶段，按年龄从早到晚排列。
+/// 顺序即语义，`segments.age_progress`（0.0~1.0）按此顺序映射。
+pub const AGE_STAGES: [&str; 6] = [
+    "childhood",
+    "teenager",
+    "young_adult",
+    "adult",
+    "middle_aged",
+    "elderly",
+];
+
+/// 把分段的 `age_progress`（0.0 ~ 1.0）映射为音色时间轴上的阶段。
+pub fn stage_for_age_progress(progress: f64) -> &'static str {
+    let clamped = progress.clamp(0.0, 1.0);
+    let index = (clamped * (AGE_STAGES.len() - 1) as f64).round() as usize;
+    AGE_STAGES[index.min(AGE_STAGES.len() - 1)]
+}
+
+/// 角色在指定年龄阶段下应使用的音色档案。
+/// 优先级：精确命中该阶段 → 默认档 `adult` → 任意一条（mimo 优先）。
+/// 音色的唯一真源是角色，因此这里只按 `character_id` 查，不看分段副本。
+pub fn voice_profile_for_character_at_stage(
+    conn: &Connection,
+    character_id: &str,
+    age_progress: Option<f64>,
+) -> StudioResult<Option<String>> {
+    let wanted = age_progress.map(stage_for_age_progress);
+    let profile_id = conn
+        .query_row(
+            "SELECT id FROM voice_profiles
+             WHERE character_id = ?1
+             ORDER BY
+               CASE
+                 WHEN ?2 IS NOT NULL AND age_stage = ?2 THEN 0
+                 WHEN age_stage = 'adult' THEN 1
+                 ELSE 2
+               END,
+               is_default ASC,
+               CASE WHEN tts_provider = 'mimo' THEN 0 ELSE 1 END,
+               name
+             LIMIT 1",
+            params![character_id, wanted],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(profile_id)
+}
+
+/// 角色身上**由人定过**的音色，排除系统自动兜底的默认档。
+/// 合并角色时用它回答「目标角色是不是已经有真正的音色了」——
+/// 光看"有没有档案"会被自动默认档骗过去。
+pub fn user_voice_profile_for_character(
     conn: &Connection,
     character_id: &str,
 ) -> StudioResult<Option<String>> {
     let profile_id = conn
         .query_row(
             "SELECT id FROM voice_profiles
-             WHERE character_id = ?1
+             WHERE character_id = ?1 AND is_default = 0
              ORDER BY
+               CASE WHEN age_stage = 'adult' THEN 0 ELSE 1 END,
                CASE WHEN tts_provider = 'mimo' THEN 0 ELSE 1 END,
+               updated_at DESC,
                name
              LIMIT 1",
             params![character_id],
@@ -660,8 +753,21 @@ pub fn preferred_voice_profile_for_character(
     Ok(profile_id)
 }
 
-pub(crate) fn ensure_default_narrator_profile(conn: &Connection, project_id: &str) -> StudioResult<String> {
-    let existing: Option<String> = conn
+/// 兼容旧调用点：不指定年龄阶段时的角色音色。
+pub fn preferred_voice_profile_for_character(
+    conn: &Connection,
+    character_id: &str,
+) -> StudioResult<Option<String>> {
+    voice_profile_for_character_at_stage(conn, character_id, None)
+}
+
+/// 项目内的旁白音色档案（`character_id` 为空的那条）。
+/// 只读，不会创建；`set_narrator_voice` 与合成解析共用同一个口径，避免"改了旁白音色界面不变"。
+pub fn narrator_profile_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> StudioResult<Option<String>> {
+    let profile_id = conn
         .query_row(
             "SELECT id FROM voice_profiles
              WHERE project_id = ?1 AND character_id IS NULL
@@ -671,20 +777,62 @@ pub(crate) fn ensure_default_narrator_profile(conn: &Connection, project_id: &st
                  WHEN name LIKE '%旁白%' THEN 1
                  ELSE 2
                END,
+               is_default ASC,
                name
              LIMIT 1",
             params![project_id],
             |row| row.get(0),
         )
-        .ok();
-    if let Some(profile_id) = existing {
+        .optional()?;
+    Ok(profile_id)
+}
+
+fn voice_profile_exists(conn: &Connection, profile_id: &str) -> StudioResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM voice_profiles WHERE id = ?1",
+        params![profile_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// 解析一个分段最终使用的音色档案，是合成链路上音色归属的唯一权威。
+///
+/// 1. 分段已定稿（审听通过 / 人工上传）且冻结档案仍在 → 用冻结的那条，
+///    这样单段返修继承的是**生成时**的音色阶段，不会跟相邻段落脱节（product-brief 第 6 节）。
+/// 2. 其余情况 → 按 `character_id` + `age_progress` 解析角色的当前音色。
+/// 3. 旁白（`character_id` 为空）→ 项目内的旁白档案。
+/// 4. 都解析不到 → 返回 `None`，由调用方 fail-closed 报错，不再静默兜底成 mock。
+pub fn resolve_voice_profile_for_segment(
+    conn: &Connection,
+    project_id: &str,
+    frozen_profile_id: Option<&str>,
+    character_id: Option<&str>,
+    age_progress: Option<f64>,
+    finalized: bool,
+) -> StudioResult<Option<String>> {
+    if finalized {
+        if let Some(profile_id) = frozen_profile_id {
+            if voice_profile_exists(conn, profile_id)? {
+                return Ok(Some(profile_id.to_string()));
+            }
+        }
+    }
+    match character_id {
+        Some(character_id) => voice_profile_for_character_at_stage(conn, character_id, age_progress),
+        None => narrator_profile_for_project(conn, project_id),
+    }
+}
+
+pub(crate) fn ensure_default_narrator_profile(conn: &Connection, project_id: &str) -> StudioResult<String> {
+    if let Some(profile_id) = narrator_profile_for_project(conn, project_id)? {
         return Ok(profile_id);
     }
     let profile_id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO voice_profiles
-         (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style)
-         VALUES (?1, ?2, NULL, 'Mimo 旁白声音', 'adult', 'mimo', 'mimo-v2.5-tts-voicedesign', ?3, 1.0, 0.0, ?4)",
+         (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style, is_default)
+         VALUES (?1, ?2, NULL, 'Mimo 旁白声音', 'adult', 'mimo', 'mimo-v2.5-tts-voicedesign', ?3, 1.0, 0.0, ?4, 1)",
         params![
             profile_id,
             project_id,
@@ -767,7 +915,7 @@ pub fn synthesize_segments_for_job(
         return Ok(());
     }
     let provider = provider_from_settings(settings);
-    let selected_segments = load_tts_requests(conn, project_root, segment_ids)?;
+    let selected_segments = load_tts_requests(conn, project_root, project_id, segment_ids)?;
     let protected_skipped = count_protected_segments(conn, &selected_segments, &options)?;
     let selected_segments = filter_tts_requests(conn, selected_segments, &options)?;
     let total = selected_segments.len().max(1);
@@ -835,6 +983,78 @@ fn retryable_status(status: reqwest::StatusCode) -> bool {
         || status.is_server_error()
 }
 
+/// 读取响应体失败的两种情形。reqwest 把**两者**都压成同一个
+/// `Error{kind: Decode}`，Display 只有一句 "error decoding response body"，
+/// 既看不出是网络问题还是 JSON 问题，也无法据以行动。这里靠 `is_timeout()`
+/// 把它重新分开，并翻成能直接定位问题的中文。
+enum ProviderBodyFailure {
+    /// 请求已被接受，但响应体没在时限内读完。
+    TimedOut(String),
+    /// 连接/HTTP 流在传输途中被提前关闭，响应体不完整。
+    Truncated(String),
+}
+
+fn read_provider_body(
+    response: reqwest::blocking::Response,
+    provider: &str,
+    endpoint: &str,
+    model: &str,
+    elapsed: Duration,
+) -> Result<(reqwest::StatusCode, String), ProviderBodyFailure> {
+    let status = response.status();
+    match response.text() {
+        Ok(text) => Ok((status, text)),
+        Err(error) => {
+            let seconds = elapsed.as_secs_f64();
+            if error.is_timeout() {
+                Err(ProviderBodyFailure::TimedOut(format!(
+                    "{provider} 读取响应超时：请求已发出（HTTP {status}），但 {seconds:.1} 秒内没读完响应体。\
+                     模型 {model}，地址 {endpoint}。（原始错误：{error}）"
+                )))
+            } else {
+                Err(ProviderBodyFailure::Truncated(format!(
+                    "{provider} 响应在传输途中被中断：HTTP {status}，{seconds:.1} 秒后连接被提前关闭，响应体不完整。\
+                     模型 {model}，地址 {endpoint}。多数情况下重试即可恢复。（原始错误：{error}）"
+                )))
+            }
+        }
+    }
+}
+
+/// 发送请求并读取响应体。
+///
+/// `send_with_retries` 只兜住了 **send 阶段**的错误；而"响应头已返回 200、响应体却在
+/// 传输途中被掐断"这类故障会穿过去，直接以 `error decoding response body` 抛到界面上
+/// —— 2026-09-25「生成声音试听」报的正是这一类。所以这里把整次请求（send + 读体）
+/// 一起重发一次；已超时的情形不重发，因为那说明整个时间预算已经耗尽。
+fn send_and_read_body<F>(
+    provider: &str,
+    endpoint: &str,
+    model: &str,
+    mut send: F,
+) -> StudioResult<(reqwest::StatusCode, String)>
+where
+    F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
+{
+    let mut last_truncation = None;
+    for attempt in 0..PROVIDER_BODY_MAX_ATTEMPTS {
+        let started = Instant::now();
+        let response = send_with_retries(&mut send)?;
+        match read_provider_body(response, provider, endpoint, model, started.elapsed()) {
+            Ok(outcome) => return Ok(outcome),
+            Err(ProviderBodyFailure::TimedOut(message)) => return Err(err(message)),
+            Err(ProviderBodyFailure::Truncated(message)) => {
+                last_truncation = Some(message);
+                if attempt + 1 < PROVIDER_BODY_MAX_ATTEMPTS {
+                    thread::sleep(retry_delay(attempt));
+                }
+            }
+        }
+    }
+    Err(err(last_truncation
+        .unwrap_or_else(|| format!("{provider} 响应体读取失败"))))
+}
+
 fn retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.min(4) as u32))
 }
@@ -886,6 +1106,9 @@ fn synthesize_selected_segments(
             "UPDATE segments SET audio_status = 'generated', review_status = 'unreviewed', updated_at = ?1 WHERE id = ?2",
             params![now(), request.segment_id],
         )?;
+        // 重新生成后，「脚本已变更 / 音色已固化 / 声音配置已变更」这些自动提示的原因就消除了。
+        // 不关的话它们会永远挂在界面上（导出闸门不看这张表，但用户会反复看到"请重新生成"）。
+        audio::resolve_auto_invalidation_issues(conn, &request.segment_id)?;
         mark_job(
             conn,
             job_id,
@@ -906,57 +1129,165 @@ fn is_job_canceled(conn: &Connection, job_id: &str) -> StudioResult<bool> {
     Ok(status == "canceled")
 }
 
+/// 需要合成的分段 id：空列表表示全书（按章节与分段顺序展开）。
+fn tts_segment_ids(conn: &Connection, segment_ids: Vec<String>) -> StudioResult<Vec<String>> {
+    if !segment_ids.is_empty() {
+        return Ok(segment_ids);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT s.id FROM segments s
+         JOIN chapters c ON c.id = s.chapter_id
+         ORDER BY c.order_index, s.order_index, s.id",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+struct SegmentVoiceSource {
+    id: String,
+    text: String,
+    character_id: Option<String>,
+    frozen_profile_id: Option<String>,
+    age_progress: Option<f64>,
+    emotion: Option<String>,
+    /// 角色名；旁白时为「旁白」。仅用于拼报错信息。
+    speaker_name: String,
+    /// 是否已定稿（审听通过 / 人工上传），决定音色是否走冻结副本。
+    finalized: bool,
+}
+
+fn load_segment_voice_sources(
+    conn: &Connection,
+    ids: &[String],
+) -> StudioResult<Vec<SegmentVoiceSource>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.text, s.character_id, s.voice_profile_id, s.age_progress, s.emotion,
+                COALESCE(c.canonical_name, '旁白'),
+                CASE WHEN s.review_status = 'approved'
+                       OR EXISTS (
+                         SELECT 1 FROM segment_audio a
+                         WHERE a.segment_id = s.id
+                           AND (a.status = 'approved' OR a.source = 'manual_upload')
+                       )
+                     THEN 1 ELSE 0 END
+         FROM segments s
+         LEFT JOIN characters c ON c.id = s.character_id
+         WHERE s.id = ?1",
+    )?;
+    let mut sources = Vec::new();
+    for id in ids {
+        let source = stmt.query_row(params![id], |row| {
+            Ok(SegmentVoiceSource {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                character_id: row.get(2)?,
+                frozen_profile_id: row.get(3)?,
+                age_progress: row.get(4)?,
+                emotion: row.get(5)?,
+                speaker_name: row.get(6)?,
+                finalized: row.get::<_, i64>(7)? == 1,
+            })
+        })?;
+        sources.push(source);
+    }
+    Ok(sources)
+}
+
+/// 生成前的音色校验：任何说话人解析不到音色都直接报错，并列出是谁、涉及多少段。
+/// 这是「没有音色就不许生成」的闸门，取代原来的 `COALESCE(v.tts_provider,'mock')` 静默兜底
+/// ——后者正是「一部分分段用 mimo、一部分悄悄变成 mock」的机制性根因。
+pub fn validate_voice_resolution(
+    conn: &Connection,
+    project_id: &str,
+    segment_ids: Vec<String>,
+) -> StudioResult<()> {
+    let ids = tts_segment_ids(conn, segment_ids)?;
+    let sources = load_segment_voice_sources(conn, &ids)?;
+    let mut missing: Vec<(String, usize)> = Vec::new();
+    for source in &sources {
+        let resolved = resolve_voice_profile_for_segment(
+            conn,
+            project_id,
+            source.frozen_profile_id.as_deref(),
+            source.character_id.as_deref(),
+            source.age_progress,
+            source.finalized,
+        )?;
+        if resolved.is_none() {
+            match missing
+                .iter_mut()
+                .find(|(name, _)| name == &source.speaker_name)
+            {
+                Some((_, count)) => *count += 1,
+                None => missing.push((source.speaker_name.clone(), 1)),
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let detail = missing
+        .iter()
+        .map(|(name, count)| format!("{name}（{count} 段）"))
+        .collect::<Vec<_>>()
+        .join("、");
+    Err(err(format!(
+        "以下说话人还没有音色，请先定音色再生成：{detail}"
+    )))
+}
+
 fn load_tts_requests(
     conn: &Connection,
     project_root: &Path,
+    project_id: &str,
     segment_ids: Vec<String>,
 ) -> StudioResult<Vec<TtsRequest>> {
-    let ids = if segment_ids.is_empty() {
-        let mut stmt = conn.prepare(
-            "SELECT s.id FROM segments s
-             JOIN chapters c ON c.id = s.chapter_id
-             ORDER BY c.order_index, s.order_index, s.id",
-        )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    } else {
-        segment_ids
-    };
+    let ids = tts_segment_ids(conn, segment_ids)?;
+    let sources = load_segment_voice_sources(conn, &ids)?;
     let mut requests = Vec::new();
-    for id in ids {
-        let request = conn.query_row(
-            "SELECT s.id, s.text, COALESCE(v.tts_provider, 'mock'), v.model,
-                    COALESCE(v.voice_id, 'mock-female-narrator'), COALESCE(v.speed, 1.0),
-                    COALESCE(v.pitch, 0.0), v.style, s.emotion, a.relative_path, a.mime_type
-             FROM segments s
-             LEFT JOIN voice_profiles v ON s.voice_profile_id = v.id
+    for source in sources {
+        let profile_id = resolve_voice_profile_for_segment(
+            conn,
+            project_id,
+            source.frozen_profile_id.as_deref(),
+            source.character_id.as_deref(),
+            source.age_progress,
+            source.finalized,
+        )?
+        .ok_or_else(|| {
+            err(format!(
+                "「{}」还没有音色，请先为它定音色再生成",
+                source.speaker_name
+            ))
+        })?;
+        let voice = conn.query_row(
+            "SELECT v.tts_provider, v.model, v.voice_id, v.speed, v.pitch, v.style,
+                    a.relative_path, a.mime_type
+             FROM voice_profiles v
              LEFT JOIN voice_assets a ON v.voice_asset_id = a.id
-             WHERE s.id = ?1",
-            params![id],
+             WHERE v.id = ?1",
+            params![profile_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, f64>(5)?,
-                    row.get::<_, f64>(6)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )?;
-        let voice_sample = match (request.9, request.10) {
+        let voice_sample = match (voice.6, voice.7) {
             (Some(relative_path), Some(mime_type)) => {
                 Some(load_voice_sample(project_root, &relative_path, &mime_type)?)
             }
             _ => None,
         };
         // 台词情绪并入 style：与角色表演提示拼接，供应商按自然语言理解
-        let parts: Vec<String> = [request.7.as_deref(), request.8.as_deref()]
+        let parts: Vec<String> = [voice.5.as_deref(), source.emotion.as_deref()]
             .into_iter()
             .flatten()
             .map(str::trim)
@@ -969,13 +1300,13 @@ fn load_tts_requests(
             Some(parts.join("，"))
         };
         requests.push(TtsRequest {
-            segment_id: request.0,
-            text: request.1,
-            tts_provider: request.2,
-            model: request.3,
-            voice_id: request.4,
-            speed: request.5,
-            pitch: request.6,
+            segment_id: source.id,
+            text: source.text,
+            tts_provider: voice.0,
+            model: voice.1,
+            voice_id: voice.2,
+            speed: voice.3,
+            pitch: voice.4,
             style,
             voice_sample,
         });
@@ -1068,6 +1399,23 @@ fn is_segment_protected(conn: &Connection, segment_id: &str) -> StudioResult<boo
     Ok(audio.status == "approved" || audio.source == "manual_upload")
 }
 
+/// 闸门：音色档案里带了克隆参考音频，但解析出的模型不是 voiceclone 时直接失败。
+///
+/// 为什么必须失败而不是警告：`mimo_request_body` 的 voicedesign 分支构造 `audio` 时
+/// **不会读 `voice_sample`**，参考音频会被静默丢弃，音色变成"按文字描述重新设计"的
+/// 另一个人；请求仍然 200 成功，界面上看不出任何异常。
+/// 触发场景：档案 `model` 为 NULL 时回退到设置里的默认模型，而设置默认是 voicedesign。
+fn ensure_model_matches_voice_sample(request: &TtsRequest, model: &str) -> StudioResult<()> {
+    if request.voice_sample.is_some() && !model.contains("voiceclone") {
+        return Err(err(format!(
+            "「{}」的音色档案带克隆样本，但模型是「{model}」，克隆参考音频会被忽略。\
+             请为这个角色重新固化音色（走 voiceclone）后再合成。",
+            request.segment_id
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_mimo_model(model: Option<&str>) -> String {
     let model = model.unwrap_or("mimo-v2.5-tts").trim();
     if model.is_empty() {
@@ -1075,6 +1423,43 @@ fn normalize_mimo_model(model: Option<&str>) -> String {
     } else {
         model.to_ascii_lowercase()
     }
+}
+
+/// VoiceDesign 的音色**完全由这段提示文字决定**，所以试听和成片必须发同一段文字。
+///
+/// 2026-09-25 实测（真实接口，同一句台词、同一模型，三组提示互不相同）：
+/// - 发「音色描述」（试听走的口径）        → 2.72s / 130,604 B / RMS 3424
+/// - 发「默认兜底提示」（批量走的口径）    → 2.08s /  99,884 B / RMS 2839 ← 明显换人
+/// - 发「音色描述 + 表演提示」（本函数口径）→ 2.88s / 138,284 B / RMS 3835
+///
+/// 旧实现只把 `style`（表演提示）发出去，**`voice_id`（音色描述）根本没进请求体**，
+/// 于是「试听听中的那个声音」在批量生成时不会复现；角色档案若 `style` 为空，
+/// 提示还会退化成一句与角色无关的默认值。
+fn build_voice_prompt(request: &TtsRequest, model: &str) -> String {
+    let style = request
+        .style
+        .as_deref()
+        .map(str::trim)
+        .filter(|style| !style.is_empty());
+    if model.contains("voicedesign") {
+        // 音色描述在前（决定"是谁"），表演提示在后（决定"怎么演"）。
+        // 试听路径把描述放在 style、voice_id 留空，两者拼接后与旧行为一致。
+        let description = request.voice_id.trim();
+        let description = if description.is_empty() || description.starts_with("clone:") {
+            None
+        } else {
+            Some(description)
+        };
+        let parts: Vec<&str> = [description, style]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.trim().is_empty())
+            .collect();
+        if !parts.is_empty() {
+            return parts.join("，");
+        }
+    }
+    style.unwrap_or("自然、清晰、适合有声读物制作").to_string()
 }
 
 fn mimo_chat_completions_endpoint(endpoint: Option<&str>) -> String {
@@ -1092,8 +1477,14 @@ fn mimo_chat_completions_endpoint(endpoint: Option<&str>) -> String {
 
 fn mimo_request_body(request: &TtsRequest, model: &str, voice_prompt: &str) -> StudioResult<Value> {
     let audio = if model.contains("voicedesign") {
+        // ⚠️ 这里**不要**下发 `optimize_text_preview`（无论 true/false 之外的取值都不要）。
+        // 2026-09-25 实测：带 `optimize_text_preview: true` 时 api.xiaomimimo.com 会在约
+        // 10 秒后把响应流掐断——状态码仍是 200，但响应体只有 1 个换行，reqwest 侧表现为
+        // 一句无从下手的 "error decoding response body"（工坊「生成声音试听」报的就是它）。
+        // 去掉之后同一次请求 0.8~1.7 秒正常返回 70~370KB 音频；只给 `{"format":"wav"}`
+        // 或不给 audio 字段都正常。
+        // 回归口径见 `mimo_voicedesign_live_returns_audio`（联网用例，需 --ignored 手动跑）。
         json!({
-            "optimize_text_preview": true,
             "format": "wav"
         })
     } else if model.contains("voiceclone") {
@@ -1213,8 +1604,10 @@ mod tests {
         assert_eq!(extract_mimo_audio_base64(&payload), Some("YWJj"));
     }
 
+    /// 回归：voicedesign 请求体里不得出现 `optimize_text_preview`。
+    /// 这个字段曾把工坊「生成声音试听」打成 200 + 空响应体（详见 `mimo_request_body` 注释）。
     #[test]
-    fn mimo_voice_design_request_uses_official_audio_format() {
+    fn mimo_voice_design_request_omits_optimize_text_preview() {
         let request = TtsRequest {
             segment_id: "seg-1".to_string(),
             text: "这是一段旁白。".to_string(),
@@ -1233,12 +1626,191 @@ mod tests {
             body.pointer("/audio/format").and_then(|v| v.as_str()),
             Some("wav")
         );
-        assert_eq!(
-            body.pointer("/audio/optimize_text_preview")
-                .and_then(|v| v.as_bool()),
-            Some(true)
+        assert!(
+            body.pointer("/audio/optimize_text_preview").is_none(),
+            "optimize_text_preview 会让 mimo 网关在 ~10s 后掐断响应流"
         );
         assert!(body.pointer("/audio/response_format").is_none());
+        assert!(body.pointer("/audio/voice").is_none());
+    }
+
+    fn voicedesign_request(voice_id: &str, style: Option<&str>) -> TtsRequest {
+        TtsRequest {
+            segment_id: "seg-voice".to_string(),
+            text: "萧炎哥哥，你终于来了。".to_string(),
+            tts_provider: "mimo".to_string(),
+            model: Some("mimo-v2.5-tts-voicedesign".to_string()),
+            voice_id: voice_id.to_string(),
+            voice_sample: None,
+            speed: 1.0,
+            pitch: 0.0,
+            style: style.map(str::to_string),
+        }
+    }
+
+    /// 回归：voicedesign 的提示必须同时带上「音色描述」和「表演提示」。
+    ///
+    /// 旧实现只把 `style` 发出去，`voice_id` 根本没进请求体 —— 试听听中的那个声音
+    /// 在批量合成时不会复现（实测同一句话换成另一段音频，见 `build_voice_prompt`）。
+    #[test]
+    fn voicedesign_prompt_carries_description_and_style() {
+        let request = voicedesign_request("清冷温润的少女音色", Some("克制而疏离"));
+        assert_eq!(
+            build_voice_prompt(&request, "mimo-v2.5-tts-voicedesign"),
+            "清冷温润的少女音色，克制而疏离"
+        );
+    }
+
+    /// 角色档案 `style` 为空（萧薰儿那条就是 NULL）时，不能退化成与角色无关的默认值。
+    #[test]
+    fn voicedesign_prompt_survives_missing_style() {
+        let request = voicedesign_request("清冷温润的少女音色", None);
+        assert_eq!(
+            build_voice_prompt(&request, "mimo-v2.5-tts-voicedesign"),
+            "清冷温润的少女音色"
+        );
+
+        // 试听口径：描述放在 style、voice_id 留空，改动前后行为一致。
+        let audition = voicedesign_request("", Some("温柔旁白"));
+        assert_eq!(
+            build_voice_prompt(&audition, "mimo-v2.5-tts-voicedesign"),
+            "温柔旁白"
+        );
+
+        // clone 档案的 voice_id 是 `clone:<asset>`，不是音色描述，不能塞进提示。
+        let clone = voicedesign_request("clone:336bd712", Some("自然"));
+        assert_eq!(
+            build_voice_prompt(&clone, "mimo-v2.5-tts-voicedesign"),
+            "自然"
+        );
+    }
+
+    /// 克隆样本配非克隆模型 = 参考音频被静默丢弃，必须直接报错而不是出声。
+    #[test]
+    fn clone_sample_with_non_clone_model_is_rejected() {
+        let mut request = voicedesign_request("clone:336bd712", Some("自然"));
+        request.voice_sample = Some(VoiceSample {
+            mime_type: "audio/wav".to_string(),
+            data_base64: "AAAA".to_string(),
+        });
+
+        let error = ensure_model_matches_voice_sample(&request, "mimo-v2.5-tts-voicedesign")
+            .expect_err("带克隆样本却不是 voiceclone 模型时必须失败");
+        assert!(
+            error.to_string().contains("voiceclone"),
+            "错误信息要给出修法：{error}"
+        );
+
+        assert!(ensure_model_matches_voice_sample(&request, "mimo-v2.5-tts-voiceclone").is_ok());
+
+        request.voice_sample = None;
+        assert!(ensure_model_matches_voice_sample(&request, "mimo-v2.5-tts").is_ok());
+    }
+
+    /// 联网契约测试：对真实 Mimo 接口跑一次 voicedesign，要求拿回完整 WAV。
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored mimo_voicedesign_live_returns_audio --nocapture
+    /// ```
+    /// API Key 优先取环境变量 `MIMO_API_KEY`，缺省时读本机 app 的密钥文件。
+    ///
+    /// 为什么必须有这一条：单元测试断言的是我们自己拼的 JSON，永远发现不了"服务端不收这个
+    /// 字段"。2026-09-25 的事故（`error decoding response body`）根因正是请求体字段，
+    /// 而当时那条单测还把错字段断言成"必须存在"。
+    #[test]
+    #[ignore = "联网 + 需要 MIMO_API_KEY，手动运行"]
+    fn mimo_voicedesign_live_returns_audio() {
+        let Some(api_key) = live_mimo_api_key() else {
+            panic!("未找到 Mimo API Key：设 MIMO_API_KEY，或让本机 app 已保存过 key");
+        };
+        let provider = MimoTtsProvider {
+            settings: ProviderSettings {
+                provider: "mimo".to_string(),
+                api_key: Some(api_key),
+                endpoint: None,
+                model: None,
+            },
+        };
+        let request = TtsRequest {
+            segment_id: "live-voicedesign".to_string(),
+            text: "萧炎，斗之力，三段！级别：低级！".to_string(),
+            tts_provider: "mimo".to_string(),
+            model: Some("mimo-v2.5-tts-voicedesign".to_string()),
+            voice_id: String::new(),
+            voice_sample: None,
+            speed: 1.0,
+            pitch: 0.0,
+            style: Some("中年男性，音色偏低沉浑厚，略带一丝沧桑的沙哑质感，中气十足。语速中等偏快，吐字清晰。".to_string()),
+        };
+
+        let result = provider
+            .synthesize_blocking(&request)
+            .expect("voicedesign 合成应成功");
+        assert_eq!(result.extension, "wav");
+        assert!(
+            result.audio_bytes.len() > 10_000,
+            "音频过短：{} 字节",
+            result.audio_bytes.len()
+        );
+        assert_eq!(&result.audio_bytes[..4], b"RIFF", "不是合法 WAV");
+    }
+
+    fn live_mimo_api_key() -> Option<String> {
+        std::env::var("MIMO_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .or_else(|| crate::read_provider_secret("mimo"))
+    }
+
+    /// 回归：分段上的人工情绪必须进合成请求的 `style`（供应商把它当表演提示解释）。
+    ///
+    /// 用户报「固化了音色、情绪不起作用」时这条链两端都可能断：
+    /// ① 前端没把情绪存进库（见 `useStudioActions::saveSegmentDraft`）；
+    /// ② 存了却没拼进请求 —— 本用例钉住②，并且要求它与角色档案的 style **拼接**而非互相覆盖。
+    #[test]
+    fn segment_emotion_reaches_the_tts_request_style() {
+        let root = std::env::temp_dir().join(format!("xiic-tts-emotion-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("sample.txt");
+        fs::write(&source_path, "张三: 斗之力，三段！").unwrap();
+        let source = crate::importer::read_source(&source_path).unwrap();
+        let summary = crate::storage::create_project(&root, "情绪链路测试", None).unwrap();
+        let project_id = summary.manifest.id.clone();
+        let conn = crate::storage::open_connection(&root).unwrap();
+        let chapter_id = crate::importer::import_source(&conn, &project_id, &source)
+            .unwrap()
+            .remove(0);
+        crate::importer::seed_segments_from_chapter(&conn, &chapter_id, false).unwrap();
+
+        let character_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO characters (id, project_id, canonical_name, gender, age_timeline, notes, default_color)
+             VALUES (?1, ?2, '中年男子', 'male', 'adult', NULL, '#8a8f98')",
+            params![character_id, project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE segments SET character_id = ?1, speaker = '中年男子', emotion = '大声宣布'",
+            params![character_id],
+        )
+        .unwrap();
+        ensure_default_voice_profiles(&conn, &project_id).unwrap();
+        conn.execute(
+            "UPDATE voice_profiles SET style = '语气公事公办' WHERE character_id = ?1",
+            params![character_id],
+        )
+        .unwrap();
+
+        let requests = load_tts_requests(&conn, &root, &project_id, Vec::new()).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].style.as_deref(),
+            Some("语气公事公办，大声宣布"),
+            "分段情绪必须与角色档案 style 一起进请求"
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

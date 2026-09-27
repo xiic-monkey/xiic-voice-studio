@@ -7,6 +7,9 @@ function fallbackDraft(segment: Segment): SegmentDraft {
     segmentType: segment.segmentType,
     speaker: segment.speaker ?? "",
     characterId: segment.characterId ?? "",
+    // 情绪必须进草稿：它在界面上可编辑，若草稿里没有这个字段，
+    // 保存时就会退化成"原值未改"，用户输入的情绪永远落不了库。
+    emotion: segment.emotion ?? "",
   };
 }
 

@@ -8,6 +8,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 mod tts;
+mod voice_context;
 
 use crate::domain::*;
 use crate::error::{err, StudioResult};
@@ -59,6 +60,33 @@ struct UpdateSegmentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SplitSegmentRequest {
+    segment_id: String,
+    /// 在文本的第几个字符处拆开（左半沿用原段，右半新建）。
+    offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeSegmentsRequest {
+    segment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InsertSegmentRequest {
+    chapter_id: String,
+    /// 省略 = 插到章首（空章节添加第一句时没有"上一段"可指）。
+    #[serde(default)]
+    after_segment_id: Option<String>,
+    text: String,
+    segment_type: SegmentType,
+    character_id: Option<String>,
+    speaker: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AssignVoiceProfileRequest {
     character_id: Option<String>,
     name: String,
@@ -80,6 +108,20 @@ struct UpdateCharacterRequest {
     aliases: Vec<String>,
     gender: Option<String>,
     age_timeline: Option<String>,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateCharacterRequest {
+    canonical_name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    gender: Option<String>,
+    #[serde(default)]
+    age_timeline: Option<String>,
+    #[serde(default)]
     notes: Option<String>,
 }
 
@@ -364,6 +406,15 @@ fn list_segments(
     storage::list_segments(&conn, chapter_id.as_deref())
 }
 
+/// 可空的人工文本字段（情绪等）：去空白后为空则视作"没有值"。
+/// 统一成 `None` 而不是 `Some("")`，库里的语义才唯一。
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 #[tauri::command]
 fn update_segment(
     state: tauri::State<'_, AppState>,
@@ -377,10 +428,13 @@ fn update_segment(
             params![request.segment_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )?;
+    // 情绪是可空的人工表演提示：空白一律归一成 NULL，否则库里会留下 `''`，
+    // 且"清空情绪"与"本来就是空"会被算成两次不同的改动，白白让音频失效。
+    let emotion = normalize_optional_text(request.emotion.as_deref());
     let script_changed = current.0 != request.text
         || current.1 != request.segment_type.as_str()
         || current.2 != request.speaker
-        || current.3 != request.emotion
+        || current.3 != emotion
         || current.4 != request.sound_cue
         || current.5 != request.anchor;
 
@@ -403,7 +457,7 @@ fn update_segment(
             request.speaker,
             character_id,
             voice_profile_id,
-            request.emotion,
+            emotion,
             request.sound_cue,
             request.anchor,
             now(),
@@ -420,6 +474,27 @@ fn update_segment(
     storage::snapshot(&root)
 }
 
+/// 删除分段的归档保留期。撤销窗口只有几十秒，但"过一天才想起来"同样常见，
+/// 而磁盘上的音频是用户花钱生成的——多留几天的成本远低于重生成。
+const DELETED_SEGMENT_RETAIN_DAYS: i64 = 7;
+
+/// 清理超过保留期的归档，并删除它们对应的磁盘音频文件。
+///
+/// 挂在删除/恢复之后顺带跑：这两个动作本身就低频，且此刻一定有项目上下文，
+/// 不必额外引入启动钩子或定时任务。
+fn purge_expired_deleted_segments(root: &Path, conn: &rusqlite::Connection) {
+    let Ok(paths) = storage::purge_expired_deleted_segments(conn, DELETED_SEGMENT_RETAIN_DAYS)
+    else {
+        return;
+    };
+    for relative_path in paths {
+        // 文件清理尽力而为，失败不影响归档本身的清理
+        if let Ok(path) = audio::resolve_audio_path(root, &relative_path) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 #[tauri::command]
 fn delete_segment(
     state: tauri::State<'_, AppState>,
@@ -427,9 +502,47 @@ fn delete_segment(
 ) -> StudioResult<StudioSnapshot> {
     let root = current_root(&state)?;
     let conn = storage::open_connection(&root)?;
-    let relative_paths = storage::delete_segment(&conn, &segment_id)?;
-    for relative_path in relative_paths {
-        // 音频文件尽力清理，失败不影响分段删除
+    let (manifest, _) = storage::ensure_project_loaded(&root)?;
+    // 归档式删除：分段整行连同音频记录一起留存，磁盘文件也不删，
+    // 所以这里不再 fs::remove_file——那正是"误触即永久丢失"的根源。
+    storage::delete_segment(&conn, &manifest.id, &segment_id)?;
+    purge_expired_deleted_segments(&root, &conn);
+    storage::snapshot(&root)
+}
+
+/// 撤销删除：把归档的分段连同音频、审听备注一起插回原位。
+#[tauri::command]
+fn restore_segment(
+    state: tauri::State<'_, AppState>,
+    segment_id: String,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    storage::restore_segment(&conn, &segment_id)?;
+    purge_expired_deleted_segments(&root, &conn);
+    storage::snapshot(&root)
+}
+
+#[tauri::command]
+fn split_segment(
+    state: tauri::State<'_, AppState>,
+    request: SplitSegmentRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    storage::split_segment_at(&conn, &request.segment_id, request.offset)?;
+    storage::snapshot(&root)
+}
+
+#[tauri::command]
+fn merge_segments(
+    state: tauri::State<'_, AppState>,
+    request: MergeSegmentsRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let orphaned = storage::merge_segments(&conn, &request.segment_ids)?;
+    for relative_path in orphaned {
         if let Ok(path) = audio::resolve_audio_path(&root, &relative_path) {
             let _ = fs::remove_file(path);
         }
@@ -438,10 +551,60 @@ fn delete_segment(
 }
 
 #[tauri::command]
+fn insert_segment(
+    state: tauri::State<'_, AppState>,
+    request: InsertSegmentRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let character_id = request.character_id.filter(|value| !value.trim().is_empty());
+    let after_segment_id = request
+        .after_segment_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    storage::insert_segment_after(
+        &conn,
+        &request.chapter_id,
+        after_segment_id,
+        &request.text,
+        request.segment_type,
+        character_id,
+        request.speaker,
+    )?;
+    storage::snapshot(&root)
+}
+
+#[tauri::command]
 fn list_characters(state: tauri::State<'_, AppState>) -> StudioResult<Vec<Character>> {
     let root = current_root(&state)?;
     let conn = storage::open_connection(&root)?;
     storage::list_characters(&conn)
+}
+
+/// 手动新建角色。
+///
+/// 标注流程之外也需要能建角色：有些角色只是被叙述提到（没被标成台词的说话人），
+/// 或者用户想先建好档案、之后再慢慢把分段挂上去。重名与别名冲突由
+/// `storage::create_character` 挡住；这里补上"立刻给一条默认音色档"，
+/// 否则新角色一进合成就会撞上「这个角色没有音色」的闸门。
+#[tauri::command]
+fn create_character(
+    state: tauri::State<'_, AppState>,
+    request: CreateCharacterRequest,
+) -> StudioResult<StudioSnapshot> {
+    let root = current_root(&state)?;
+    let (manifest, mut conn) = storage::ensure_project_loaded(&root)?;
+    storage::create_character(
+        &mut conn,
+        &manifest.id,
+        &request.canonical_name,
+        &request.aliases,
+        request.gender.as_deref(),
+        request.age_timeline.as_deref(),
+        request.notes.as_deref(),
+    )?;
+    tts::ensure_default_voice_profiles(&conn, &manifest.id)?;
+    storage::snapshot(&root)
 }
 
 #[tauri::command]
@@ -525,9 +688,14 @@ fn merge_character_records(
     )?;
     let segments_to_invalidate =
         tts::segment_ids_matching_voice_scope(conn, Some(source_character_id), true)?;
-    let mut target_profile_id =
-        tts::preferred_voice_profile_for_character(conn, target_character_id)?;
+    // 目标角色已经有"人定过"的音色 → 保留它；否则丢掉目标的自动默认档、改用来源角色的音色。
+    // 只看"有没有档案"会被自动兜底的默认音色骗过去，所以这里用 user_voice_profile_for_character。
+    let mut target_profile_id = tts::user_voice_profile_for_character(conn, target_character_id)?;
     if target_profile_id.is_none() {
+        conn.execute(
+            "DELETE FROM voice_profiles WHERE character_id = ?1 AND is_default = 1",
+            params![target_character_id],
+        )?;
         conn.execute(
             "UPDATE voice_profiles SET character_id = ?1 WHERE character_id = ?2",
             params![target_character_id, source_character_id],
@@ -750,6 +918,8 @@ async fn enqueue_tts_batch(
     let settings = provider_settings_with_stored_key(request.settings)?;
     let force_regenerate = request.force_regenerate.unwrap_or(false);
     let options = tts::TtsSynthesisOptions { force_regenerate };
+    // 生成前的音色闸门：任何说话人没有音色都不入队，也不许静默兜底成 mock。
+    tts::validate_voice_resolution(&conn, &manifest.id, request.segment_ids.clone())?;
     let job_id = tts::create_tts_job(
         &conn,
         &manifest.id,
@@ -794,47 +964,211 @@ struct GenerateVoiceDescriptionRequest {
     settings: Option<ai::LlmSettings>,
 }
 
-/// 根据角色资料与台词样本，让 LLM 生成 voicedesign 音色描述。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterVoiceContextRequest {
+    character_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CharacterVoiceContextPayload {
+    /// 依据章节上下文生成的音色描述草稿（纯本地，无需 LLM）
+    draft: String,
+    line_count: usize,
+    narration_count: usize,
+    /// 抽样台词，供界面展示"参考了什么"
+    sample_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceDescriptionPayload {
+    description: String,
+    /// llm = AI 精修；draft = 回退到章节上下文草稿
+    source: String,
+    warning: Option<String>,
+    line_count: usize,
+    narration_count: usize,
+}
+
+struct CharacterProfile {
+    name: String,
+    aliases: Vec<String>,
+    gender: Option<String>,
+    age_timeline: Option<String>,
+    notes: Option<String>,
+}
+
+fn load_character_profile(conn: &rusqlite::Connection, character_id: &str) -> StudioResult<CharacterProfile> {
+    let (name, gender, age_timeline, notes): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT canonical_name, gender, age_timeline, notes FROM characters WHERE id = ?1",
+        params![character_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let mut stmt = conn.prepare("SELECT alias FROM character_aliases WHERE character_id = ?1")?;
+    let aliases = stmt
+        .query_map(params![character_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(CharacterProfile {
+        name,
+        aliases,
+        gender,
+        age_timeline,
+        notes,
+    })
+}
+
+/// 装配该角色的章节上下文：自己的台词 + 关于他的叙述。
+fn build_voice_context(
+    conn: &rusqlite::Connection,
+    character_id: &str,
+) -> StudioResult<(CharacterProfile, voice_context::VoiceContext)> {
+    let profile = load_character_profile(conn, character_id)?;
+    let mut keywords = vec![profile.name.clone()];
+    keywords.extend(profile.aliases.iter().cloned());
+    let segments = storage::list_segments_for_voice_context(conn, character_id, &keywords)?;
+    let context = voice_context::assemble(character_id, &profile.name, &profile.aliases, &segments);
+    Ok((profile, context))
+}
+
+fn draft_for(profile: &CharacterProfile, context: &voice_context::VoiceContext) -> String {
+    voice_context::compose_draft(
+        &profile.name,
+        &profile.aliases,
+        profile.gender.as_deref(),
+        profile.age_timeline.as_deref(),
+        profile.notes.as_deref(),
+        context,
+    )
+}
+
+/// 送给 LLM 的角色资料：性别/年龄阶段先归一成中文，不把 `female` / `adult` 这类
+/// 内部 token 直接丢给模型——否则模型会照抄进音色描述里。
+fn character_info_text(profile: &CharacterProfile) -> String {
+    let aliases = if profile.aliases.is_empty() {
+        "无".to_string()
+    } else {
+        profile.aliases.join("、")
+    };
+    let gender = profile
+        .gender
+        .as_deref()
+        .and_then(voice_context::normalize_gender)
+        .unwrap_or_else(|| "未标注".to_string());
+    let age = profile
+        .age_timeline
+        .as_deref()
+        .and_then(voice_context::age_stage_label)
+        .unwrap_or_else(|| "未标注".to_string());
+    format!(
+        "别名：{aliases}；性别：{gender}；年龄阶段：{age}；备注：{}",
+        profile.notes.as_deref().unwrap_or("无"),
+    )
+}
+
+/// 工坊打开时调用：给出该角色的章节上下文概览与可用的音色描述草稿。
+#[tauri::command]
+fn character_voice_context(
+    state: tauri::State<'_, AppState>,
+    request: CharacterVoiceContextRequest,
+) -> StudioResult<CharacterVoiceContextPayload> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let (profile, context) = build_voice_context(&conn, &request.character_id)?;
+    Ok(CharacterVoiceContextPayload {
+        draft: draft_for(&profile, &context),
+        line_count: context.line_count(),
+        narration_count: context.narration_count(),
+        sample_lines: context.lines.iter().take(6).cloned().collect(),
+    })
+}
+
+/// 依据章节上下文让 LLM 精修音色描述。
+///
+/// 与旧实现的区别：① 送进去的是拆干净的台词 + 相关叙述，而不是「对白混叙述」的整段原文；
+/// ② 返回值会被校验，疑似照抄原文时先严格重试一次，仍不合格就回退到本地草稿并给出 warning——
+/// 宁可给一份能用的草稿，也不把章节原文塞回描述框。
 #[tauri::command]
 async fn generate_voice_description(
     state: tauri::State<'_, AppState>,
     request: GenerateVoiceDescriptionRequest,
-) -> StudioResult<String> {
+) -> StudioResult<VoiceDescriptionPayload> {
     let root = current_root(&state)?;
     let conn = storage::open_connection(&root)?;
-    let settings = llm_settings_with_stored_key(request.settings)?.ok_or_else(|| err("请先在设置中配置 LLM 标注"))?;
-    let (name, notes): (String, Option<String>) = conn.query_row(
-        "SELECT canonical_name, notes FROM characters WHERE id = ?1",
-        params![request.character_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let aliases: String = conn
-        .query_row(
-            "SELECT COALESCE(GROUP_CONCAT(alias, '、'), '') FROM character_aliases WHERE character_id = ?1",
-            params![request.character_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_default();
-    let dialogues: Vec<String> = storage::list_segments(&conn, None)?
-        .iter()
-        .filter(|segment| {
-            segment.character_id.as_deref() == Some(request.character_id.as_str())
-                && segment.segment_type.as_str() == "dialogue"
-        })
-        .take(5)
-        .map(|segment| segment.text.clone())
-        .collect();
-    let dialogue_samples = if dialogues.is_empty() {
-        "（暂无台词样本）".to_string()
-    } else {
-        dialogues.join("\n")
+    let settings = llm_settings_with_stored_key(request.settings)?
+        .ok_or_else(|| err("请先在「设置 · LLM 标注」里填写并保存 API Key"))?;
+    if settings
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err(err(
+            "还没配置 LLM API Key：设置 · LLM 标注 里填入并保存后再试",
+        ));
+    }
+    let (profile, context) = build_voice_context(&conn, &request.character_id)?;
+    let draft = draft_for(&profile, &context);
+    let info = character_info_text(&profile);
+
+    let first = ai::generate_voice_description(
+        &profile.name,
+        &info,
+        &context.lines,
+        &context.narration(),
+        settings.clone(),
+        false,
+    )
+    .await;
+
+    let mut warning = None;
+    let mut source = "llm";
+    let description = match first {
+        Ok(text) if ai::invalid_voice_description_reason(&text, &context.lines).is_none() => text,
+        other => {
+            let reason = match &other {
+                Ok(text) => ai::invalid_voice_description_reason(text, &context.lines)
+                    .unwrap_or_else(|| "LLM 返回内容不可用".to_string()),
+                Err(error) => error.to_string(),
+            };
+            let retried = ai::generate_voice_description(
+                &profile.name,
+                &info,
+                &context.lines,
+                &context.narration(),
+                settings,
+                true,
+            )
+            .await;
+            match retried {
+                Ok(text) if ai::invalid_voice_description_reason(&text, &context.lines).is_none() => {
+                    warning = Some(format!("首次返回不合格（{reason}），已重试成功"));
+                    text
+                }
+                _ => {
+                    warning = Some(format!("{reason}；已回退到章节上下文草稿"));
+                    source = "draft";
+                    draft
+                }
+            }
+        }
     };
-    let character_info = format!(
-        "别名：{aliases}；备注：{}",
-        notes.as_deref().unwrap_or("无")
-    );
-    ai::generate_voice_description(&name, &character_info, &dialogue_samples, settings).await
+    Ok(VoiceDescriptionPayload {
+        description,
+        source: source.to_string(),
+        warning,
+        line_count: context.line_count(),
+        narration_count: context.narration_count(),
+    })
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -870,7 +1204,7 @@ async fn generate_character_voice_sample(
         return Err(err("请先填写试听台词"));
     }
     let settings = provider_settings_with_stored_key(request.settings)?
-        .ok_or_else(|| err("请先在设置中配置 TTS 生成"))?;
+        .ok_or_else(|| err("还没配置 TTS：设置 · 语音生成 里选择 mimo 并保存 API Key"))?;
     if settings.provider != "mimo" {
         return Err(err("音色设计流程仅支持 Mimo（voicedesign + voiceclone）"));
     }
@@ -972,33 +1306,59 @@ fn finalize_character_voice(
         params![request.character_id, manifest.id],
         |row| row.get(0),
     )?;
-    // 该角色旧的声音档案解绑归档，避免同角色多套音色
-    conn.execute(
-        "UPDATE voice_profiles SET character_id = NULL, updated_at = ?1 WHERE character_id = ?2",
-        params![storage::now(), request.character_id],
-    )?;
-    let profile_id = uuid::Uuid::new_v4().to_string();
+    // 固化 = 把该角色这一阶段的音色就地写成克隆音色。
+    // 旧实现把同角色的旧档案 `character_id = NULL` 解绑成"孤儿"，这些孤儿会被当成旁白档案
+    // ——斗破苍穹库里那 4 条 character_id 为空的档案正是这么来的。这里改为就地更新，不再产生孤儿。
     let timestamp = storage::now();
-    conn.execute(
-        "INSERT INTO voice_profiles
-         (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id,
-          voice_asset_id, speed, pitch, style, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'adult', 'mimo', 'mimo-v2.5-tts-voiceclone', ?5, ?6, 1.0, 0.0, NULL, ?7, ?8)",
-        params![
-            profile_id,
-            manifest.id,
-            request.character_id,
-            format!("{name} 声音（已固化）"),
-            format!("clone:{asset_id}"),
-            asset_id,
-            timestamp,
-            timestamp
-        ],
-    )?;
-    // 未生成音频的分段跟随新音色
-    conn.execute(
-        "UPDATE segments SET voice_profile_id = NULL WHERE character_id = ?1 AND audio_status = 'missing'",
-        params![request.character_id],
+    let voice_id = format!("clone:{asset_id}");
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM voice_profiles
+             WHERE character_id = ?1 AND age_stage = 'adult'
+             ORDER BY name LIMIT 1",
+            params![request.character_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(profile_id) => {
+            conn.execute(
+                "UPDATE voice_profiles
+                 SET name = ?1, tts_provider = 'mimo', model = 'mimo-v2.5-tts-voiceclone',
+                     voice_id = ?2, voice_asset_id = ?3, is_default = 0, updated_at = ?4
+                 WHERE id = ?5",
+                params![
+                    format!("{name} 声音（已固化）"),
+                    voice_id,
+                    asset_id,
+                    timestamp,
+                    profile_id
+                ],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO voice_profiles
+                 (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id,
+                  voice_asset_id, speed, pitch, style, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'adult', 'mimo', 'mimo-v2.5-tts-voiceclone', ?5, ?6, 1.0, 0.0, NULL, ?7, ?8)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    manifest.id,
+                    request.character_id,
+                    format!("{name} 声音（已固化）"),
+                    voice_id,
+                    asset_id,
+                    timestamp,
+                    timestamp
+                ],
+            )?;
+        }
+    }
+    mark_character_segments_pending(
+        &conn,
+        &request.character_id,
+        "角色音色已固化，请重新生成该分段音频",
     )?;
     let _ = (relative_path, mime_type);
     storage::snapshot(&root)
@@ -1142,6 +1502,20 @@ fn play_segment_audio(
     let root = current_root(&state)?;
     let conn = storage::open_connection(&root)?;
     audio::segment_audio_path(&conn, &root, &segment_id)
+}
+
+/// 角色音色的「固化样本」原文件路径。
+/// 为什么不放在前端拼 rootPath + relativePath：样本文件可能被外部删掉，
+/// 只有后端能给出「路径 + 文件是否还在」这一个确定答案，前端只管播。
+#[tauri::command]
+fn voice_asset_audio_path(
+    state: tauri::State<'_, AppState>,
+    asset_id: String,
+) -> StudioResult<Option<String>> {
+    let root = current_root(&state)?;
+    let conn = storage::open_connection(&root)?;
+    let (manifest, _) = storage::ensure_project_loaded(&root)?;
+    storage::voice_asset_audio_path(&conn, &root, &manifest.id, &asset_id)
 }
 
 #[tauri::command]
@@ -1467,10 +1841,53 @@ struct SetCharacterVoiceRequest {
     voice_id: String,
     tts_provider: String,
     model: Option<String>,
+    /// 指定要更新的音色档案；一个角色有多个年龄阶段档位时用来精确落到某一条。
+    profile_id: Option<String>,
+    /// 未指定 `profile_id` 时按年龄阶段定位；缺省为默认档 `adult`。
+    age_stage: Option<String>,
 }
 
-/// 角色直接绑定音色 ID：已绑定声音档案的更新其音色，否则创建一条档案。
-/// 音色一致性由"角色的属性"保证——同一角色的所有分段用同一音色。
+fn normalize_age_stage(value: Option<&str>) -> StudioResult<&'static str> {
+    let candidate = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("adult");
+    tts::AGE_STAGES
+        .iter()
+        .copied()
+        .find(|stage| *stage == candidate)
+        .ok_or_else(|| err(format!("未知的年龄阶段：{candidate}")))
+}
+
+/// 音色变更后，把该角色**尚未定稿**的分段标记为需要重新生成。
+/// 已审听通过 / 人工上传的分段是定稿：音色不再跟随角色变化，
+/// 这样单段返修继承的仍是生成时的音色，不会跟相邻段落脱节（product-brief 第 6 节）。
+fn mark_character_segments_pending(
+    conn: &rusqlite::Connection,
+    character_id: &str,
+    reason: &str,
+) -> StudioResult<()> {
+    let pending: Vec<String> = conn
+        .prepare("SELECT id FROM segments WHERE character_id = ?1 AND review_status != 'approved'")?
+        .query_map(params![character_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    conn.execute(
+        "UPDATE segments SET voice_profile_id = NULL, updated_at = ?1
+         WHERE character_id = ?2 AND review_status != 'approved'",
+        params![storage::now(), character_id],
+    )?;
+    for segment_id in pending {
+        audio::invalidate_segment_audio(conn, &segment_id, reason)?;
+    }
+    Ok(())
+}
+
+/// 为角色设定音色：定位该角色的某一条音色档案并就地更新（没有则新建）。
+///
+/// 音色是**角色的属性**（product-brief 第 4 节 `VoiceProfile: character ID, age stage, ...`）。
+/// 分段不持有可独立演化的副本——合成时按 `character_id` + `age_progress` 实时解析，
+/// 所以改完音色**不需要、也不允许**去清空 `segments.voice_profile_id`：
+/// 那个"清空"动作正是此前「改一次角色音色就冒出一批 mock 分段」的机制性根因。
 #[tauri::command]
 fn set_character_voice(
     state: tauri::State<'_, AppState>,
@@ -1483,44 +1900,95 @@ fn set_character_voice(
         return Err(err("音色 ID 不能为空"));
     }
     let provider = normalize_provider_id(&request.tts_provider)?;
+    apply_character_voice(
+        &conn,
+        &request.character_id,
+        voice_id,
+        &provider,
+        request.model.as_deref(),
+        request.profile_id.as_deref(),
+        request.age_stage.as_deref(),
+    )?;
+    storage::snapshot(&root)
+}
+
+/// `set_character_voice` 的可测内核：定位目标档案 → 就地更新 → 把未定稿分段标记为待重生成。
+#[allow(clippy::too_many_arguments)]
+fn apply_character_voice(
+    conn: &rusqlite::Connection,
+    character_id: &str,
+    voice_id: &str,
+    provider: &str,
+    model: Option<&str>,
+    requested_profile_id: Option<&str>,
+    requested_age_stage: Option<&str>,
+) -> StudioResult<()> {
     let project_id: String = conn.query_row(
         "SELECT project_id FROM characters WHERE id = ?1",
-        params![request.character_id],
+        params![character_id],
         |row| row.get(0),
     )?;
     let name: String = conn.query_row(
         "SELECT canonical_name FROM characters WHERE id = ?1",
-        params![request.character_id],
+        params![character_id],
         |row| row.get(0),
     )?;
-    let updated = conn.execute(
-        "UPDATE voice_profiles SET voice_id = ?1, model = 'mimo-v2.5-tts', voice_asset_id = NULL, updated_at = ?2 WHERE character_id = ?3",
-        params![voice_id, storage::now(), request.character_id],
-    )?;
-    if updated == 0 {
-        conn.execute(
-            "INSERT INTO voice_profiles (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'adult', ?5, ?6, ?7, 1.0, 0.0, NULL, ?8, ?9)",
-            params![
-                uuid::Uuid::new_v4().to_string(),
-                project_id,
-                request.character_id,
-                format!("{name} 声音"),
-                provider,
-                request.model,
-                voice_id,
-                storage::now(),
-                storage::now()
-            ],
-        )?;
-    }
-    let _ = name;
-    // 该角色未生成音频的分段跟随新音色
+    let profile_id = match requested_profile_id {
+        Some(profile_id) => conn
+            .query_row(
+                "SELECT id FROM voice_profiles WHERE id = ?1 AND character_id = ?2",
+                params![profile_id, character_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| err("音色档案不存在或不属于该角色"))?,
+        None => {
+            let age_stage = normalize_age_stage(requested_age_stage)?;
+            match conn
+                .query_row(
+                    "SELECT id FROM voice_profiles
+                     WHERE character_id = ?1 AND age_stage = ?2
+                     ORDER BY is_default ASC, name LIMIT 1",
+                    params![character_id, age_stage],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                Some(existing) => existing,
+                None => {
+                    let new_id = uuid::Uuid::new_v4().to_string();
+                    let timestamp = storage::now();
+                    conn.execute(
+                        "INSERT INTO voice_profiles
+                         (id, project_id, character_id, name, age_stage, tts_provider, model, voice_id, speed, pitch, style, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1.0, 0.0, NULL, ?9, ?10)",
+                        params![
+                            new_id,
+                            project_id,
+                            character_id,
+                            format!("{name} 声音"),
+                            age_stage,
+                            provider,
+                            model,
+                            voice_id,
+                            timestamp,
+                            timestamp
+                        ],
+                    )?;
+                    new_id
+                }
+            }
+        }
+    };
     conn.execute(
-        "UPDATE segments SET voice_profile_id = NULL WHERE character_id = ?1 AND audio_status = 'missing'",
-        params![request.character_id],
+        "UPDATE voice_profiles
+         SET voice_id = ?1, tts_provider = ?2, model = ?3, voice_asset_id = NULL,
+             is_default = 0, updated_at = ?4
+         WHERE id = ?5",
+        params![voice_id, provider, model, storage::now(), profile_id],
     )?;
-    storage::snapshot(&root)
+    mark_character_segments_pending(conn, character_id, "角色音色已更新，请重新生成该分段音频")?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1546,7 +2014,9 @@ fn set_narrator_voice(
     let (manifest, _) = storage::ensure_project_loaded(&root)?;
     let narrator_profile_id = tts::ensure_default_narrator_profile(&conn, &manifest.id)?;
     conn.execute(
-        "UPDATE voice_profiles SET voice_id = ?1, tts_provider = ?2, model = ?3, updated_at = ?4 WHERE id = ?5",
+        "UPDATE voice_profiles
+         SET voice_id = ?1, tts_provider = ?2, model = ?3, is_default = 0, updated_at = ?4
+         WHERE id = ?5",
         params![
             voice_id,
             normalize_provider_id(&request.tts_provider)?,
@@ -1803,7 +2273,12 @@ pub fn run() {
             list_segments,
             update_segment,
             delete_segment,
+            restore_segment,
+            split_segment,
+            merge_segments,
+            insert_segment,
             list_characters,
+            create_character,
             update_character,
             merge_characters,
             assign_voice_profile,
@@ -1819,6 +2294,7 @@ pub fn run() {
             delete_job,
             clear_finished_jobs,
             play_segment_audio,
+            voice_asset_audio_path,
             get_audio_output_directory,
             review_segment_audio,
             upload_segment_audio,
@@ -1844,6 +2320,7 @@ pub fn run() {
             get_provider_api_key,
             delete_provider_api_key,
             bind_character_voice,
+            character_voice_context,
             generate_voice_description,
             generate_character_voice_sample,
             finalize_character_voice,
